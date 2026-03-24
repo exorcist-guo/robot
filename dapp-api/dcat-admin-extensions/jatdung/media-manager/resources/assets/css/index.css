@@ -1,0 +1,76 @@
+.goto-url input.form-control {
+    font-size: 1em;
+}
+
+.switch-view {
+    height: 34px;
+}
+
+.breadcrumb {
+    padding: 8px 15px;
+    margin-bottom: 20px;
+    list-style: none;
+    background-color: #f5f5f5;
+    border-radius: 4px;
+}
+
+.file-name {
+    font-weight: bold;
+    color: #666;
+    display: block;
+    overflow: hidden !important;
+    white-space: nowrap !important;
+    text-overflow: ellipsis !important;
+}
+
+.file-icon.has-img > img {
+    max-width: 100%;
+    height: auto;
+}
+
+.copy-url-btn {
+    height: 100%;
+}
+
+/* only in spread */
+.file-info {
+    text-align: center;
+    padding: 10px;
+    background: #f4f4f4;
+}
+
+.file-size {
+    color: #999;
+    font-size: 12px;
+    display: block;
+}
+
+.files {
+    margin: 0;
+    padding: 0;
+
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(11em, .5fr));
+    column-gap: .8em;
+    row-gap: 2em;
+    justify-content: space-around;
+}
+
+.files > li > .file-select {
+    position: absolute;
+}
+
+.files > li {
+    border: 1px solid #eee;
+    position: relative;
+}
+
+/* only in list end */
+
+
+/* only in table */
+.action-row {
+    text-align: center;
+}
+
+/* only in table end */

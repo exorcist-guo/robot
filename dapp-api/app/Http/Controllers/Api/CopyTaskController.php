@@ -1,0 +1,393 @@
+<?php
+
+namespace App\Http\Controllers\Api;
+
+use App\Http\Controllers\Controller;
+use App\Models\Pm\PmCopyTask;
+use App\Models\Pm\PmLeader;
+use App\Models\Pm\PmMember;
+use App\Traits\ApiResponseTrait;
+use Illuminate\Http\Request;
+
+class CopyTaskController extends Controller
+{
+    use ApiResponseTrait;
+
+    private function currentMember(Request $request): PmMember
+    {
+        /** @var PmMember $user */
+        $user = $request->user();
+        return $user;
+    }
+
+    public function index(Request $request)
+    {
+        $member = $this->currentMember($request);
+
+        $list = PmCopyTask::query()
+            ->select([
+                'id',
+                'leader_id',
+                'status',
+                'mode',
+                'ratio_bps',
+                'min_usdc',
+                'max_usdc',
+                'max_slippage_bps',
+                'allow_partial_fill',
+                'daily_max_usdc',
+                'tail_order_usdc',
+                'tail_trigger_amount',
+                'tail_time_limit_seconds',
+                'tail_loss_stop_count',
+                'tail_loss_count',
+                'market_slug',
+                'market_id',
+                'market_question',
+                'market_symbol',
+                'resolution_source',
+                'price_to_beat',
+                'market_end_at',
+                'token_yes_id',
+                'token_no_id',
+                'created_at',
+            ])
+            ->with(['leader:id,proxy_wallet,display_name,avatar_url'])
+            ->where('member_id', $member->id)
+            ->orderByDesc('id')
+            ->get()
+            ->map(fn (PmCopyTask $t) => [
+                'id' => $t->id,
+                'status' => $t->status,
+                'mode' => $t->mode,
+                'ratio_bps' => $t->ratio_bps,
+                'min_usdc' => (string) $t->min_usdc,
+                'max_usdc' => (string) $t->max_usdc,
+                'max_slippage_bps' => $t->max_slippage_bps,
+                'allow_partial_fill' => (bool) $t->allow_partial_fill,
+                'daily_max_usdc' => $t->daily_max_usdc === null ? null : (string) $t->daily_max_usdc,
+                'tail_order_usdc' => (string) $t->tail_order_usdc,
+                'tail_trigger_amount' => $t->tail_trigger_amount,
+                'tail_time_limit_seconds' => $t->tail_time_limit_seconds,
+                'tail_loss_stop_count' => $t->tail_loss_stop_count,
+                'tail_loss_count' => $t->tail_loss_count,
+                'market' => [
+                    'slug' => $t->market_slug,
+                    'market_id' => $t->market_id,
+                    'question' => $t->market_question,
+                    'symbol' => $t->market_symbol,
+                    'resolution_source' => $t->resolution_source,
+                    'price_to_beat' => $t->price_to_beat,
+                    'end_at' => $t->market_end_at?->toDateTimeString(),
+                    'token_yes_id' => $t->token_yes_id,
+                    'token_no_id' => $t->token_no_id,
+                ],
+                'leader' => $t->leader_id ? [
+                    'id' => $t->leader->id,
+                    'proxy_wallet' => $t->leader->proxy_wallet,
+                    'display_name' => $t->leader->display_name,
+                    'avatar_url' => $t->leader->avatar_url,
+                ] : null,
+                'created_at' => $t->created_at?->toDateTimeString(),
+            ]);
+
+        return $this->success('ok', ['list' => $list]);
+    }
+
+    public function store(Request $request)
+    {
+        $member = $this->currentMember($request);
+        $mode = (string) $request->input('mode', PmCopyTask::MODE_LEADER_COPY);
+
+        if ($mode === PmCopyTask::MODE_TAIL_SWEEP) {
+            return $this->storeTailSweep($request, $member);
+        }
+
+        return $this->storeLeaderCopy($request, $member);
+    }
+
+    public function update(Request $request, int $id)
+    {
+        $member = $this->currentMember($request);
+        $task = $this->findOwnedTask($member, $id);
+        if (!$task) {
+            return $this->error('任务不存在');
+        }
+
+        if ($task->mode === PmCopyTask::MODE_TAIL_SWEEP) {
+            return $this->updateTailSweep($request, $task);
+        }
+
+        $fields = [];
+        foreach (['ratio_bps', 'min_usdc', 'max_usdc'] as $k) {
+            if ($request->has($k)) {
+                $fields[$k] = $request->input($k);
+            }
+        }
+
+        if (isset($fields['ratio_bps'])) {
+            $ratioBps = (int) $fields['ratio_bps'];
+            if ($ratioBps <= 0 || $ratioBps > 1000000) {
+                return $this->error('ratio_bps 不合法');
+            }
+            $fields['ratio_bps'] = $ratioBps;
+        }
+        if (isset($fields['min_usdc'])) {
+            $fields['min_usdc'] = max(0, (int) $fields['min_usdc']);
+        }
+        if (isset($fields['max_usdc'])) {
+            $fields['max_usdc'] = max(0, (int) $fields['max_usdc']);
+        }
+
+        $task->fill(array_merge($fields, $this->normalizeCommonRiskFieldsForPatch($request, true)));
+        $task->save();
+
+        return $this->success('ok');
+    }
+
+    public function pause(Request $request, int $id)
+    {
+        $member = $this->currentMember($request);
+        $task = $this->findOwnedTask($member, $id);
+        if (!$task) {
+            return $this->error('任务不存在');
+        }
+
+        $task->status = 0;
+        $task->save();
+
+        return $this->success('ok');
+    }
+
+    public function resume(Request $request, int $id)
+    {
+        $member = $this->currentMember($request);
+        $task = $this->findOwnedTask($member, $id);
+        if (!$task) {
+            return $this->error('任务不存在');
+        }
+
+        $task->status = 1;
+        $task->save();
+
+        return $this->success('ok');
+    }
+
+    public function destroy(Request $request, int $id)
+    {
+        $member = $this->currentMember($request);
+        $task = $this->findOwnedTask($member, $id);
+        if (!$task) {
+            return $this->error('任务不存在');
+        }
+
+        $task->delete();
+
+        return $this->success('删除成功');
+    }
+
+    private function storeLeaderCopy(Request $request, PmMember $member)
+    {
+        $leaderId = (int) $request->input('leader_id', 0);
+        $ratioBps = (int) $request->input('ratio_bps', 10000);
+        $minUsdc = (int) $request->input('min_usdc', 0);
+        $maxUsdc = (int) $request->input('max_usdc', 0);
+
+        if ($leaderId <= 0) {
+            return $this->error('leader_id 必填');
+        }
+        $leader = PmLeader::find($leaderId);
+        if (!$leader) {
+            return $this->error('leader 不存在');
+        }
+        if ($ratioBps <= 0 || $ratioBps > 1000000) {
+            return $this->error('ratio_bps 不合法');
+        }
+
+        $payload = array_merge($this->normalizeCommonRiskFieldsForCreate($request, false), [
+            'mode' => PmCopyTask::MODE_LEADER_COPY,
+            'status' => 1,
+            'ratio_bps' => $ratioBps,
+            'min_usdc' => max(0, $minUsdc),
+            'max_usdc' => max(0, $maxUsdc),
+        ]);
+
+        $task = PmCopyTask::withTrashed()
+            ->where('member_id', $member->id)
+            ->where('mode', PmCopyTask::MODE_LEADER_COPY)
+            ->where('leader_id', $leader->id)
+            ->first();
+
+        if ($task) {
+            if ($task->trashed()) {
+                $task->restore();
+            }
+            $task->fill($payload);
+            $task->save();
+        } else {
+            $task = PmCopyTask::create([
+                'member_id' => $member->id,
+                'leader_id' => $leader->id,
+                ...$payload,
+            ]);
+        }
+
+        return $this->success('ok', ['id' => $task->id]);
+    }
+
+    private function storeTailSweep(Request $request, PmMember $member)
+    {
+        $marketSlug = trim((string) $request->input('market_slug', ''));
+        // 五分钟轮次类市场 slug 末尾通常带一段 Unix 时间戳；保存时去掉尾部时间戳，便于后续自动衔接下一轮。
+        $marketSlug = preg_replace('/-\d{10}$/', '', $marketSlug) ?: $marketSlug;
+        $marketId = trim((string) $request->input('market_id', ''));
+        $tokenYesId = trim((string) $request->input('token_yes_id', ''));
+        $tokenNoId = trim((string) $request->input('token_no_id', ''));
+        $priceToBeat = trim((string) $request->input('price_to_beat', ''));
+        $tailOrderUsdc = max(0, (int) $request->input('tail_order_usdc', 0));
+        $tailTriggerAmount = trim((string) $request->input('tail_trigger_amount', '0'));
+        $tailTimeLimitSeconds = max(1, (int) $request->input('tail_time_limit_seconds', 30));
+        $tailLossStopCount = max(0, (int) $request->input('tail_loss_stop_count', 0));
+
+        if ($marketSlug === '' || $marketId === '') {
+            return $this->error('market 信息必填');
+        }
+        if ($tokenYesId === '' || $tokenNoId === '') {
+            return $this->error('token 信息不完整');
+        }
+        if (!preg_match('/^\d+(\.\d+)?$/', $priceToBeat)) {
+            return $this->error('price_to_beat 不合法');
+        }
+        if (!preg_match('/^\d+(\.\d+)?$/', $tailTriggerAmount) || bccomp($tailTriggerAmount, '0', 8) <= 0) {
+            return $this->error('tail_trigger_amount 不合法');
+        }
+        if ($tailOrderUsdc <= 0) {
+            return $this->error('tail_order_usdc 必须大于 0');
+        }
+
+        $payload = array_merge($this->normalizeCommonRiskFieldsForCreate($request, true), [
+            'mode' => PmCopyTask::MODE_TAIL_SWEEP,
+            'leader_id' => null,
+            'status' => 1,
+            'market_slug' => $marketSlug,
+            'market_id' => $marketId,
+            'market_question' => (string) $request->input('market_question', ''),
+            'market_symbol' => (string) $request->input('market_symbol', 'btc/usd'),
+            'resolution_source' => (string) $request->input('resolution_source', ''),
+            'token_yes_id' => $tokenYesId,
+            'token_no_id' => $tokenNoId,
+            'price_to_beat' => $priceToBeat,
+            'market_end_at' => $request->input('market_end_at'),
+            'tail_order_usdc' => $tailOrderUsdc,
+            'tail_trigger_amount' => $tailTriggerAmount,
+            'tail_time_limit_seconds' => $tailTimeLimitSeconds,
+            'tail_loss_stop_count' => $tailLossStopCount,
+        ]);
+
+        $task = PmCopyTask::withTrashed()
+            ->where('member_id', $member->id)
+            ->where('mode', PmCopyTask::MODE_TAIL_SWEEP)
+            ->where('market_slug', $marketSlug)
+            ->first();
+
+        if ($task) {
+            if ($task->trashed()) {
+                $task->restore();
+            }
+            $task->fill($payload);
+            $task->tail_loss_count = 0;
+            $task->tail_round_started_value = null;
+            $task->tail_last_triggered_round_key = null;
+            $task->tail_loss_stopped_at = null;
+            $task->save();
+        } else {
+            $task = PmCopyTask::create([
+                'member_id' => $member->id,
+                ...$payload,
+            ]);
+        }
+
+        return $this->success('ok', ['id' => $task->id]);
+    }
+
+    private function updateTailSweep(Request $request, PmCopyTask $task)
+    {
+        $fields = [];
+        foreach (['tail_order_usdc', 'tail_trigger_amount', 'tail_time_limit_seconds', 'tail_loss_stop_count'] as $k) {
+            if ($request->has($k)) {
+                $fields[$k] = $request->input($k);
+            }
+        }
+
+        if (isset($fields['tail_order_usdc'])) {
+            $fields['tail_order_usdc'] = max(0, (int) $fields['tail_order_usdc']);
+            if ($fields['tail_order_usdc'] <= 0) {
+                return $this->error('tail_order_usdc 必须大于 0');
+            }
+        }
+        if (isset($fields['tail_trigger_amount'])) {
+            $value = trim((string) $fields['tail_trigger_amount']);
+            if (!preg_match('/^\d+(\.\d+)?$/', $value) || bccomp($value, '0', 8) <= 0) {
+                return $this->error('tail_trigger_amount 不合法');
+            }
+            $fields['tail_trigger_amount'] = $value;
+        }
+        if (isset($fields['tail_time_limit_seconds'])) {
+            $fields['tail_time_limit_seconds'] = max(1, (int) $fields['tail_time_limit_seconds']);
+        }
+        if (isset($fields['tail_loss_stop_count'])) {
+            $fields['tail_loss_stop_count'] = max(0, (int) $fields['tail_loss_stop_count']);
+        }
+
+        $task->fill(array_merge($fields, $this->normalizeCommonRiskFieldsForPatch($request, true)));
+        $task->save();
+
+        return $this->success('ok');
+    }
+
+    private function normalizeCommonRiskFieldsForCreate(Request $request, bool $allowNullDailyMaxUsdc = false): array
+    {
+        return $this->normalizeCommonRiskFields($request, $allowNullDailyMaxUsdc, false);
+    }
+
+    private function normalizeCommonRiskFieldsForPatch(Request $request, bool $allowNullDailyMaxUsdc = false): array
+    {
+        return $this->normalizeCommonRiskFields($request, $allowNullDailyMaxUsdc, true);
+    }
+
+    private function normalizeCommonRiskFields(
+        Request $request,
+        bool $allowNullDailyMaxUsdc = false,
+        bool $preserveWhenMissing = false
+    ): array {
+        $fields = [];
+
+        if (!$preserveWhenMissing || $request->has('max_slippage_bps')) {
+            $fields['max_slippage_bps'] = max(0, (int) $request->input('max_slippage_bps', 50));
+        }
+
+        if (!$preserveWhenMissing || $request->has('allow_partial_fill')) {
+            $fields['allow_partial_fill'] = (bool) $request->input('allow_partial_fill', true);
+        }
+
+        if ($preserveWhenMissing && !$request->has('daily_max_usdc')) {
+            return $fields;
+        }
+
+        $dailyMaxUsdc = $request->input('daily_max_usdc');
+        if ($allowNullDailyMaxUsdc && ($dailyMaxUsdc === null || $dailyMaxUsdc === '')) {
+            $dailyMaxUsdc = null;
+        } else {
+            $dailyMaxUsdc = max(0, (int) $dailyMaxUsdc);
+        }
+
+        $fields['daily_max_usdc'] = $dailyMaxUsdc;
+
+        return $fields;
+    }
+
+    private function findOwnedTask(PmMember $member, int $id): ?PmCopyTask
+    {
+        return PmCopyTask::where('member_id', $member->id)->where('id', $id)->first();
+    }
+}
