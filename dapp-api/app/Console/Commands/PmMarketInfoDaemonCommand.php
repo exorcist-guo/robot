@@ -99,7 +99,7 @@ class PmMarketInfoDaemonCommand extends Command
         try {
             // 首次建连时，按当前任务推导出的 market 全量订阅。
             $socket = $stream->connect($desiredMarkets);
-            $subscribedMarketIds = $cache->putSubscribedMarkets(array_column($desiredMarkets, 'market_id'));
+            $subscribedMarketIds = $cache->putSubscribedMarkets(array_column($desiredMarkets, 'asset_id'));
 
             $cache->putHeartbeat([
                 'connected' => true,
@@ -115,13 +115,13 @@ class PmMarketInfoDaemonCommand extends Command
                     $lastRefreshAt = $now;
                     // 周期性重新从任务推导订阅 market，支持运行中自动切到新轮次。
                     $desiredMarkets = $registry->desiredMarkets();
-                    $desiredMarketIds = array_column($desiredMarkets, 'market_id');
+                    $desiredMarketIds = array_column($desiredMarkets, 'asset_id');
                     // 只对新增的 market 做增量订阅；首版不做 unsubscribe。
                     $missingIds = array_values(array_diff($desiredMarketIds, $subscribedMarketIds));
                     if ($missingIds !== []) {
                         $missingMarkets = array_values(array_filter(
                             $desiredMarkets,
-                            static fn (array $market): bool => in_array((string) ($market['market_id'] ?? ''), $missingIds, true)
+                            static fn (array $market): bool => in_array((string) ($market['asset_id'] ?? ''), $missingIds, true)
                         ));
                         $stream->subscribe($socket, $missingMarkets);
                         $subscribedMarketIds = $cache->putSubscribedMarkets(array_merge($subscribedMarketIds, $missingIds));

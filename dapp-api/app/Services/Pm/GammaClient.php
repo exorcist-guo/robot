@@ -67,6 +67,40 @@ class GammaClient
     }
 
     /**
+     * @return array<string,mixed>
+     */
+    public function getPricesHistory(string $marketId, int $startTs, ?int $endTs = null, string $interval = '1m', int $fidelity = 10): array
+    {
+        $marketId = trim($marketId);
+        if ($marketId === '') {
+            return [];
+        }
+
+        $query = [
+            'market' => $marketId,
+            'startTs' => $startTs,
+            'interval' => $interval,
+            'fidelity' => $fidelity,
+        ];
+        if ($endTs !== null && $endTs >= $startTs) {
+            $query['endTs'] = $endTs;
+        }
+
+        $baseUrl = rtrim((string) config('pm.clob_base_url', 'https://clob.polymarket.com'), '/');
+        $res = $this->client->get($baseUrl.'/prices-history', [
+            'query' => $query,
+        ]);
+
+        $json = json_decode($res->getBody()->getContents(), true);
+        if (!is_array($json)) {
+            return [];
+        }
+
+        $history = $json['history'] ?? [];
+        return is_array($history) ? array_values($history) : [];
+    }
+
+    /**
      * @return array<string,mixed>|null
      */
     public function resolveTailSweepMarket(string $input): ?array

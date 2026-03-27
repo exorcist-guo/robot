@@ -16,9 +16,10 @@ use Dcat\Admin\Traits\HasDateTimeFormatter;
  * @property string $wallet_role 钱包角色: master/sub
  * @property int|null $parent_wallet_id 父钱包ID
  * @property string|null $purpose 用途
+ * @property string|null $address 登录地址(小写)
  * @property string $signer_address 签名地址(EOA, 小写)
  * @property string|null $funder_address 资金地址/ProxyWallet(小写)
- * @property string $private_key_ciphertext 加密后的私钥
+ * @property string|null $en_private_key Google 加密后的私钥
  * @property int $encryption_version
  * @property int $signature_type 签名类型: 0=EOA 1=ProxyEmail 2=ProxyWallet/Safe
  * @property string $exchange_nonce Exchange nonce (默认0)
@@ -42,7 +43,6 @@ use Dcat\Admin\Traits\HasDateTimeFormatter;
  * @method static \Illuminate\Database\Eloquent\Builder|PmCustodyWallet whereId($value)
  * @method static \Illuminate\Database\Eloquent\Builder|PmCustodyWallet whereMemberId($value)
  * @method static \Illuminate\Database\Eloquent\Builder|PmCustodyWallet whereParentWalletId($value)
- * @method static \Illuminate\Database\Eloquent\Builder|PmCustodyWallet wherePrivateKeyCiphertext($value)
  * @method static \Illuminate\Database\Eloquent\Builder|PmCustodyWallet wherePurpose($value)
  * @method static \Illuminate\Database\Eloquent\Builder|PmCustodyWallet whereSignatureType($value)
  * @method static \Illuminate\Database\Eloquent\Builder|PmCustodyWallet whereSignerAddress($value)

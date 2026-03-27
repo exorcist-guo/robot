@@ -57,7 +57,7 @@ class MarketInfoRegistry
 
             foreach ($this->extractAssetIds($market) as $assetId) {
                 $markets[] = [
-                    'market_id' => $assetId,
+                    'asset_id' => $assetId,
                     'label' => $currentSlug,
                 ];
             }

@@ -34,11 +34,12 @@ class PmApproveWalletCommand extends Command
 
         $wallet = $member->custodyWallet;
         if (!$wallet) {
-            $this->error('未导入托管钱包');
+            $this->error('PM 托管钱包不存在，请先让该用户重新登录');
             return self::FAILURE;
         }
 
         $this->info('成员: ' . $member->address . ' (id=' . $member->id . ')');
+        $this->info('login address: ' . ($wallet->address ?: '-'));
         $this->info('signer: ' . $wallet->signer_address);
         $this->info('funder: ' . ($wallet->funder_address ?: '-'));
 

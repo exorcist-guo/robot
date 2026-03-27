@@ -30,7 +30,6 @@ class Kernel extends ConsoleKernel
      */
     protected function schedule(Schedule $schedule): void
     {
-        $schedule->command('pm:scan-tail-sweep')->everyFiveSeconds()->withoutOverlapping();
     }
 
     /**

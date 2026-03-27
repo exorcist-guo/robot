@@ -5,8 +5,6 @@ import { useAppStore } from '../stores/app'
 import http from '../api/http'
 
 const store = useAppStore()
-const privateKey = ref('')
-const saving = ref(false)
 const checkingAllowance = ref(false)
 const approving = ref(false)
 
@@ -44,28 +42,9 @@ const logout = () => {
   location.href = '/login'
 }
 
-const importWallet = async () => {
-  if (!privateKey.value) {
-    showFailToast('请输入私钥')
-    return
-  }
-  saving.value = true
-  try {
-    await http.post('/wallet/import', { private_key: privateKey.value })
-    privateKey.value = ''
-    await store.fetchWalletStatus()
-    store.walletAllowanceStatus = null
-    showSuccessToast('托管钱包导入成功')
-  } catch (error: any) {
-    showFailToast(error.message || '导入失败')
-  } finally {
-    saving.value = false
-  }
-}
-
 const checkAllowanceStatus = async () => {
   if (!hasWallet.value) {
-    showFailToast('请先导入托管钱包')
+    showFailToast('PM 托管钱包不存在，请重新登录后重试')
     return
   }
   checkingAllowance.value = true
@@ -80,7 +59,7 @@ const checkAllowanceStatus = async () => {
 
 const approveWallet = async () => {
   if (!hasWallet.value) {
-    showFailToast('请先导入托管钱包')
+    showFailToast('PM 托管钱包不存在，请重新登录后重试')
     return
   }
   approving.value = true
@@ -111,7 +90,7 @@ const approveWallet = async () => {
       <div class="section-header">
         <h2 class="section-title">账户概览</h2>
         <span class="info-chip" :class="hasWallet ? 'info-chip--success' : 'info-chip--warning'">
-          {{ hasWallet ? '已导入托管钱包' : '未导入托管钱包' }}
+          {{ hasWallet ? 'PM 托管钱包已创建' : 'PM 托管钱包未创建' }}
         </span>
       </div>
       <van-cell-group inset>
@@ -120,20 +99,6 @@ const approveWallet = async () => {
         <van-cell title="Signer 地址" :label="store.walletStatus?.wallet?.signer_address || '-'" class="address-row" />
         <van-cell title="Funder 地址" :label="store.walletStatus?.wallet?.funder_address || '-'" class="address-row" />
       </van-cell-group>
-    </section>
-
-    <section class="surface-card section-card section-card--danger">
-      <div class="section-header section-header--stack">
-        <div>
-          <h2 class="section-title">导入托管私钥</h2>
-          <p class="inline-note">该区域为敏感操作，仅用于导入托管钱包，不会改变原有接口行为。</p>
-        </div>
-        <span class="info-chip info-chip--danger">敏感操作</span>
-      </div>
-      <van-cell-group inset>
-        <van-field v-model="privateKey" type="textarea" rows="4" placeholder="0x... 或 64位hex 私钥" />
-      </van-cell-group>
-      <van-button block type="danger" :loading="saving" @click="importWallet">导入托管钱包</van-button>
     </section>
 
     <section class="surface-card section-card">
@@ -190,20 +155,11 @@ const approveWallet = async () => {
   margin-bottom: 18px;
 }
 
-.section-card--danger {
-  border-color: rgba(239, 68, 68, 0.12);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(254, 242, 242, 0.92));
-}
-
 .section-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-}
-
-.section-header--stack {
-  align-items: center;
 }
 
 .address-row :deep(.van-cell__label),

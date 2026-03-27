@@ -115,8 +115,8 @@ class PmExecuteOrderIntentJob implements ShouldQueue
             return;
         }
 
-        $price = (string) ($intent->leader_price ?: '0');
-        if (bccomp($price, '0', 8) <= 0) {
+        $leaderPrice = (string) ($intent->leader_price ?: '0');
+        if (bccomp($leaderPrice, '0', 8) <= 0) {
             $intent->status = PmOrderIntent::STATUS_SKIPPED;
             $intent->skip_reason = 'invalid_price';
             $intent->save();
@@ -138,10 +138,48 @@ class PmExecuteOrderIntentJob implements ShouldQueue
             return;
         }
 
+        $bestPrice = $trading->getOrderBookBestPrice((string) $intent->token_id, $side);
+        $executionPrice = (string) ($bestPrice['price'] ?? '0');
+        if (bccomp($executionPrice, '0', 8) <= 0) {
+            $intent->status = PmOrderIntent::STATUS_SKIPPED;
+            $intent->skip_reason = 'missing_best_price';
+            $intent->last_error_code = 'missing_best_price';
+            $intent->last_error_message = 'missing_best_price';
+            $intent->save();
+
+            PmOrder::updateOrCreate(
+                ['order_intent_id' => $intent->id],
+                [
+                    'status' => PmOrder::STATUS_REJECTED,
+                    'request_payload' => [
+                        'intent_id' => $intent->id,
+                        'member_id' => $intent->member_id,
+                        'copy_task_id' => $intent->copy_task_id,
+                        'leader_trade_id' => $intent->leader_trade_id,
+                        'market_id' => $contextMarketId,
+                        'outcome' => $contextOutcome,
+                        'token_id' => (string) $intent->token_id,
+                        'side' => $side,
+                        'leader_price' => $leaderPrice,
+                        'price_source' => 'orderbook_best_price',
+                        'book' => $bestPrice['book'] ?? [],
+                    ],
+                    'response_payload' => null,
+                    'error_code' => 'missing_best_price',
+                    'error_message' => 'missing_best_price',
+                    'failure_category' => 'validation',
+                    'is_retryable' => false,
+                    'retry_count' => max(0, $intent->attempt_count - 1),
+                    'last_sync_at' => now(),
+                ]
+            );
+            return;
+        }
+
         $usdc = BigDecimal::of((string) $intent->clamped_usdc)
             ->dividedBy('1000000', 6, RoundingMode::DOWN);
         $sizeScale = $side === PolymarketTradingService::SIDE_BUY ? 2 : 4;
-        $size = $usdc->dividedBy($price, $sizeScale, RoundingMode::DOWN);
+        $size = $usdc->dividedBy($executionPrice, $sizeScale, RoundingMode::DOWN);
 
         if ($size->isLessThanOrEqualTo(BigDecimal::zero())) {
             $intent->status = PmOrderIntent::STATUS_SKIPPED;
@@ -150,7 +188,7 @@ class PmExecuteOrderIntentJob implements ShouldQueue
             return;
         }
 
-        $normalizedPrice = BigDecimal::of($price)->toScale(4, RoundingMode::DOWN)->stripTrailingZeros()->__toString();
+        $normalizedPrice = BigDecimal::of($executionPrice)->toScale(4, RoundingMode::DOWN)->stripTrailingZeros()->__toString();
         $normalizedSize = $size->stripTrailingZeros()->__toString();
         $normalizedNotional = BigDecimal::of($normalizedPrice)
             ->multipliedBy($normalizedSize)
@@ -186,7 +224,9 @@ class PmExecuteOrderIntentJob implements ShouldQueue
                         'outcome' => $contextOutcome,
                         'token_id' => (string) $intent->token_id,
                         'side' => $side,
-                        'leader_price' => $price,
+                        'leader_price' => $leaderPrice,
+                        'execution_price' => $executionPrice,
+                        'price_source' => 'orderbook_best_price',
                         'normalized_price' => $normalizedPrice,
                         'target_usdc' => (string) $intent->target_usdc,
                         'clamped_usdc' => (string) $intent->clamped_usdc,
@@ -242,7 +282,7 @@ class PmExecuteOrderIntentJob implements ShouldQueue
         $slippage = $trading->evaluateSlippage(
             (string) $intent->token_id,
             $side,
-            $normalizedPrice,
+            $leaderPrice,
             (int) ($riskSnapshot['max_slippage_bps'] ?? 0),
         );
         if (($slippage['passed'] ?? true) !== true) {
@@ -256,7 +296,13 @@ class PmExecuteOrderIntentJob implements ShouldQueue
                 ['order_intent_id' => $intent->id],
                 [
                     'status' => PmOrder::STATUS_REJECTED,
-                    'request_payload' => ['slippage' => $slippage, 'risk_snapshot' => $riskSnapshot],
+                    'request_payload' => [
+                        'slippage' => $slippage,
+                        'risk_snapshot' => $riskSnapshot,
+                        'leader_price' => $leaderPrice,
+                        'execution_price' => $executionPrice,
+                        'price_source' => 'orderbook_best_price',
+                    ],
                     'response_payload' => null,
                     'error_code' => 'slippage_exceeded',
                     'error_message' => 'slippage_exceeded',
@@ -290,7 +336,9 @@ class PmExecuteOrderIntentJob implements ShouldQueue
             'outcome' => $contextOutcome,
             'token_id' => (string) $intent->token_id,
             'side' => $side,
-            'leader_price' => $price,
+            'leader_price' => $leaderPrice,
+            'execution_price' => $executionPrice,
+            'price_source' => 'orderbook_best_price',
             'normalized_price' => $normalizedPrice,
             'target_usdc' => (string) $intent->target_usdc,
             'clamped_usdc' => (string) $intent->clamped_usdc,

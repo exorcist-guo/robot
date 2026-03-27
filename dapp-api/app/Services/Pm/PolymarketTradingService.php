@@ -24,13 +24,14 @@ class PolymarketTradingService
 
     public function __construct(
         private readonly CustodyCipher $cipher,
+        private readonly PmPrivateKeyResolver $privateKeyResolver,
         private readonly PolymarketOrderSigner $orderSigner,
         private readonly PolymarketClientFactory $factory,
     ) {}
 
     public function ensureApiCredentials(PmCustodyWallet $wallet): PmPolymarketApiCredential
     {
-        $privateKey = $this->cipher->decryptString($wallet->private_key_ciphertext);
+        $privateKey = $this->privateKeyResolver->resolve($wallet);
         $signer = new ClobAuthEip712Signer($privateKey, (int) config('pm.chain_id', 137));
         $auth = new ClobAuthenticator(
             $signer,
@@ -343,7 +344,7 @@ class PolymarketTradingService
             throw new \RuntimeException('PM_POLYGON_RPC_URL 未配置');
         }
 
-        $privateKey = $this->cipher->decryptString($wallet->private_key_ciphertext);
+        $privateKey = $this->privateKeyResolver->resolve($wallet);
         $credential = Credential::fromKey(ltrim($privateKey, '0x'));
         $from = strtolower($credential->getAddress());
         $nonce = $this->rpcQuantityToInt($this->rpc($rpcUrl, 'eth_getTransactionCount', [$from, 'pending']));
@@ -410,7 +411,7 @@ class PolymarketTradingService
             throw new \RuntimeException('PM_POLYGON_RPC_URL 未配置');
         }
 
-        $privateKey = $this->cipher->decryptString($wallet->private_key_ciphertext);
+        $privateKey = $this->privateKeyResolver->resolve($wallet);
         $credential = Credential::fromKey(ltrim($privateKey, '0x'));
         $from = strtolower($credential->getAddress());
         $nonce = $this->rpcQuantityToInt($this->rpc($rpcUrl, 'eth_getTransactionCount', [$from, 'pending']));
@@ -479,7 +480,7 @@ class PolymarketTradingService
     {
         $credRecord = $wallet->apiCredentials ?: $this->ensureApiCredentials($wallet);
         $creds = $this->decodeApiCredentials($credRecord);
-        $privateKey = $this->cipher->decryptString($wallet->private_key_ciphertext);
+        $privateKey = $this->privateKeyResolver->resolve($wallet);
 
         $client = $this->factory->makeAuthedClobClient($privateKey, $creds);
 
@@ -585,7 +586,7 @@ class PolymarketTradingService
     {
         $credRecord = $wallet->apiCredentials ?: $this->ensureApiCredentials($wallet);
         $creds = $this->decodeApiCredentials($credRecord);
-        $privateKey = $this->cipher->decryptString($wallet->private_key_ciphertext);
+        $privateKey = $this->privateKeyResolver->resolve($wallet);
         $client = $this->factory->makeAuthedClobClient($privateKey, $creds);
 
         $params = [
@@ -597,7 +598,10 @@ class PolymarketTradingService
             $params['token_id'] = trim($tokenId);
         }
 
-        return $client->clob()->account()->getBalanceAllowance($params);
+        return $this->withTransientClobRetry(
+            fn () => $client->clob()->account()->getBalanceAllowance($params),
+            '读取 Polymarket allowance 失败'
+        );
     }
 
     /**
@@ -672,6 +676,33 @@ class PolymarketTradingService
             static fn (string $value) => strtolower(trim($value)),
             array_filter($spenders, static fn ($value) => is_string($value) && trim($value) !== '')
         )));
+    }
+
+    private function withTransientClobRetry(callable $callback, string $message): array
+    {
+        $attempts = 0;
+        beginning:
+        try {
+            /** @var array<string,mixed> $result */
+            $result = $callback();
+            return $result;
+        } catch (\Throwable $e) {
+            $attempts++;
+            if ($attempts < 2 && $this->isTransientClobTlsError($e)) {
+                goto beginning;
+            }
+
+            throw new \RuntimeException($message . ': ' . $e->getMessage(), previous: $e);
+        }
+    }
+
+    private function isTransientClobTlsError(\Throwable $e): bool
+    {
+        $message = strtolower($e->getMessage());
+
+        return str_contains($message, 'curl error 35')
+            || str_contains($message, 'unexpected eof while reading')
+            || str_contains($message, 'ssl routines');
     }
 
     private function isPositiveDecimal(string $value): bool

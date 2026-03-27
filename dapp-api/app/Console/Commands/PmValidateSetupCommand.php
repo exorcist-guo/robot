@@ -43,15 +43,16 @@ class PmValidateSetupCommand extends Command
 
         $wallet = $member->custodyWallet;
         if (!$wallet) {
-            $this->error('未导入托管钱包');
+            $this->error('PM 托管钱包不存在，请先让该用户重新登录');
             return self::FAILURE;
         }
 
+        $this->info('login address: ' . ($wallet->address ?: '-'));
         $this->info('signer: ' . $wallet->signer_address);
         $this->info('funder: ' . ($wallet->funder_address ?: '-'));
 
         if (!config('pm.custody_key')) {
-            $this->error('未配置 PM_CUSTODY_KEY');
+            $this->error('未配置 PM_CUSTODY_KEY（用于加密 Polymarket API 凭证）');
             $this->line('请先在 .env 中添加一行，例如：');
             $this->line('PM_CUSTODY_KEY=base64:这里放32字节随机密钥');
             $this->line('可用以下命令生成： php -r "echo \"base64:\".base64_encode(random_bytes(32)).PHP_EOL;"');

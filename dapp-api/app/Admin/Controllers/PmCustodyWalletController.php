@@ -44,6 +44,7 @@ class PmCustodyWalletController extends AdminController
 
             $grid->column('id', 'ID')->sortable();
             $grid->column('member.address', '会员地址')->display(fn ($value) => self::maskAddress($value));
+            $grid->column('address', '登录地址')->display(fn ($value) => self::maskAddress($value));
             $grid->column('wallet_role', '钱包角色')->using(self::ROLE_MAP)->label([
                 PmCustodyWallet::ROLE_MASTER => 'success',
                 PmCustodyWallet::ROLE_SUB => 'info',
@@ -88,12 +89,13 @@ class PmCustodyWalletController extends AdminController
         return Show::make($id, new PmCustodyWallet(), function (Show $show) {
             $show->field('id', 'ID');
             $show->field('member.address', '会员地址');
+            $show->field('address', '登录地址');
             $show->field('wallet_role', '钱包角色')->using(self::ROLE_MAP);
             $show->field('parentWallet.signer_address', '父钱包地址');
             $show->field('purpose', '用途');
             $show->field('signer_address', '签名地址');
             $show->field('funder_address', '资金地址');
-            $show->field('private_key_ciphertext', '私钥密文')->as(fn () => '已隐藏');
+            $show->field('en_private_key', '私钥密文')->as(fn () => '已隐藏');
             $show->field('encryption_version', '加密版本');
             $show->field('signature_type', '签名类型')->using(self::SIGNATURE_TYPE_MAP);
             $show->field('exchange_nonce', 'Exchange Nonce');
@@ -112,12 +114,13 @@ class PmCustodyWalletController extends AdminController
         return Form::make(new PmCustodyWallet(), function (Form $form) {
             $form->display('id', 'ID');
             $form->select('member_id', '会员')->options($this->memberOptions())->required();
+            $form->text('address', '登录地址');
             $form->select('wallet_role', '钱包角色')->options(self::ROLE_MAP)->required();
             $form->select('parent_wallet_id', '父钱包')->options($this->walletOptions());
             $form->text('purpose', '用途');
             $form->text('signer_address', '签名地址')->required();
             $form->text('funder_address', '资金地址');
-            $form->display('private_key_ciphertext', '私钥密文')->value('已隐藏');
+            $form->display('en_private_key', '私钥密文')->value('已隐藏');
             $form->display('encryption_version', '加密版本');
             $form->select('signature_type', '签名类型')->options(self::SIGNATURE_TYPE_MAP)->required();
             $form->text('exchange_nonce', 'Exchange Nonce');

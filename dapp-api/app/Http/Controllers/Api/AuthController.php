@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Pm\PmAuthNonce;
 use App\Models\Pm\PmMember;
+use App\Services\Pm\CustodyTransferService;
 use App\Services\Pm\EthSignature;
 use App\Traits\ApiResponseTrait;
 use Illuminate\Http\Request;
@@ -51,7 +52,7 @@ class AuthController extends Controller
         ]);
     }
 
-    public function login(Request $request)
+    public function login(Request $request, CustodyTransferService $custodyTransferService)
     {
         $address = (string) $request->input('address', '');
         $signature = (string) $request->input('signature', '');
@@ -116,6 +117,7 @@ class AuthController extends Controller
 
         $member->last_login_at = now();
         $member->save();
+        $wallet = $custodyTransferService->getOrCreateMasterWallet($member);
 
         $token = $member->createToken('h5')->plainTextToken;
 
@@ -126,6 +128,13 @@ class AuthController extends Controller
                 'address' => $member->address,
                 'nickname' => $member->nickname,
                 'avatar_url' => $member->avatar_url,
+            ],
+            'wallet' => [
+                'address' => $wallet->address,
+                'signer_address' => $wallet->signer_address,
+                'funder_address' => $wallet->funder_address,
+                'signature_type' => $wallet->signature_type,
+                'status' => $wallet->status,
             ],
         ]);
     }

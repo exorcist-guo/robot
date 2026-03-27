@@ -3,6 +3,8 @@
 return [
     // 用于托管私钥/Polymarket 凭证加密（建议单独于 APP_KEY）
     'custody_key' => env('PM_CUSTODY_KEY', '019cf9d9-26f9-7050-b0f1-c574b1a7df74'),
+    'google_public_key_path' => env('PM_GOOGLE_PUBLIC_KEY_PATH', config_path('public_key.pem')),
+    'google_private_key_path' => env('PM_GOOGLE_PRIVATE_KEY_PATH', config_path('private_key.pem')),
 
     // Polymarket 相关基础配置
     'gamma_base_url' => env('PM_GAMMA_BASE_URL', 'https://gamma-api.polymarket.com'),
@@ -52,6 +54,13 @@ return [
     'market_info_daemon_idle_sleep_seconds' => (int) env('PM_MARKET_INFO_DAEMON_IDLE_SLEEP_SECONDS', 5),
     'market_info_refresh_seconds' => (int) env('PM_MARKET_INFO_REFRESH_SECONDS', 10),
     'market_info_require_redis' => filter_var(env('PM_MARKET_INFO_REQUIRE_REDIS', true), FILTER_VALIDATE_BOOL),
+
+    // tail sweep 扫描 daemon
+    'tail_sweep_scan_cache_store' => env('PM_TAIL_SWEEP_SCAN_CACHE_STORE', env('PM_TAIL_SWEEP_PRICE_CACHE_STORE', '')),
+    'tail_sweep_scan_require_redis' => filter_var(env('PM_TAIL_SWEEP_SCAN_REQUIRE_REDIS', true), FILTER_VALIDATE_BOOL),
+    'tail_sweep_scan_lock_seconds' => (int) env('PM_TAIL_SWEEP_SCAN_LOCK_SECONDS', 600),
+    'tail_sweep_scan_loop_sleep_seconds' => (int) env('PM_TAIL_SWEEP_SCAN_LOOP_SLEEP_SECONDS', 5),
+    'tail_sweep_market_cache_ttl_seconds' => (int) env('PM_TAIL_SWEEP_MARKET_CACHE_TTL_SECONDS', 1800),
 
     // Polymarket CTF Exchange (Polygon) 相关
     'chain_id' => (int) env('PM_CHAIN_ID', 137),

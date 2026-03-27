@@ -31,6 +31,7 @@ class MeController extends Controller
             'avatar_url' => $member->avatar_url,
             'inviter_id' => $member->inviter_id,
             'wallet' => $wallet ? [
+                'address' => $wallet->address,
                 'signer_address' => $wallet->signer_address,
                 'funder_address' => $wallet->funder_address,
                 'signature_type' => $wallet->signature_type,

@@ -4,7 +4,7 @@ namespace App\Jobs;
 
 use App\Models\Pm\PmCopyTask;
 use App\Models\Pm\PmOrder;
-use App\Services\Pm\CustodyCipher;
+use App\Services\Pm\PmPrivateKeyResolver;
 use App\Services\Pm\PolymarketClientFactory;
 use Brick\Math\BigDecimal;
 use Brick\Math\RoundingMode;
@@ -22,7 +22,7 @@ class PmSyncOrderStatusJob implements ShouldQueue
     {
     }
 
-    public function handle(PolymarketClientFactory $factory, CustodyCipher $cipher): void
+    public function handle(PolymarketClientFactory $factory, PmPrivateKeyResolver $privateKeyResolver): void
     {
         $order = PmOrder::with('intent.copyTask.member.custodyWallet.apiCredentials')->find($this->orderId);
         if (!$order || !$order->poly_order_id) {
@@ -37,7 +37,7 @@ class PmSyncOrderStatusJob implements ShouldQueue
 
         $trading = app(\App\Services\Pm\PolymarketTradingService::class);
         $creds = $trading->decodeApiCredentials($credRecord);
-        $privateKey = $cipher->decryptString($wallet->private_key_ciphertext);
+        $privateKey = $privateKeyResolver->resolve($wallet);
         $client = $factory->makeAuthedClobClient($privateKey, $creds);
         $remote = $client->clob()->orders()->get((string) $order->poly_order_id);
 

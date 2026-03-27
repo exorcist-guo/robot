@@ -9,27 +9,28 @@ use App\Services\Pm\GammaClient;
 use App\Services\Pm\MarketInfoCache;
 use App\Services\Pm\PolymarketTradingService;
 use App\Services\Pm\TailSweepPriceCache;
+use GuzzleHttp\Client;
 use Illuminate\Console\Command;
 use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 
-class PmScanTailSweepCommand extends Command
+class PlaceOrderDirectly extends Command
 {
-    // 常驻扫尾盘扫描；--once 仅用于调试，跑一轮后退出。
-    protected $signature = 'pm:scan-tail-sweep {--once : 仅执行一次扫描，便于调试}';
 
-    protected $description = '常驻扫描扫尾盘任务并在满足条件时生成下单意图';
+    protected $signature = 'place-order-directly';
+
+    protected $description = '不判断条件,直接根据涨跌自动下单';
 
     public function handle(
         GammaClient $gammaClient,
         TailSweepPriceCache $priceCache,
         PolymarketTradingService $trading,
         MarketInfoCache $marketInfoCache
-    ): int
+    )
     {
-        $once = (bool) $this->option('once');
+
         $cacheStore = $this->cacheStore();
         $lockStoreName = config('pm.tail_sweep_scan_cache_store');
         $lockStore = $lockStoreName !== null && $lockStoreName !== '' ? Cache::store($lockStoreName) : Cache::store();
@@ -47,40 +48,9 @@ class PmScanTailSweepCommand extends Command
             return self::FAILURE;
         }
 
-        $lock = $lockProvider->lock(
-            $this->daemonLockKey(),
-            max(10, (int) config('pm.tail_sweep_scan_lock_seconds', 600))
-        );
 
-        try {
-            $lock->block(1);
-        } catch (LockTimeoutException) {
-            $this->warn('已有扫尾盘扫描 daemon 正在运行，当前进程退出');
 
-            return self::SUCCESS;
-        }
-
-        try {
-            do {
-                try {
-                    $this->scan($gammaClient, $priceCache, $trading, $marketInfoCache);
-                    if ($once) {
-                        $this->info('扫尾盘扫描完成');
-
-                        return self::SUCCESS;
-                    }
-                } catch (\Throwable $e) {
-                    $this->error('扫尾盘扫描异常: '.$e->getMessage());
-                    if ($once) {
-                        return self::FAILURE;
-                    }
-                }
-
-                sleep(max(1, (int) config('pm.tail_sweep_scan_loop_sleep_seconds', 5)));
-            } while (true);
-        } finally {
-            optional($lock)->release();
-        }
+        $this->scan($gammaClient, $priceCache, $trading, $marketInfoCache);
     }
 
     private function scan(
@@ -131,11 +101,18 @@ class PmScanTailSweepCommand extends Command
             $baseSlug = $this->normalizeBaseSlug((string) $task->market_slug);
             if ($baseSlug !== '') {
                 $currentRoundSlug = $this->buildCurrentRoundSlug($baseSlug, $now);
+                // $gammaClient->test($currentRoundSlug);exit;
                 $currentRoundKey = $this->buildRoundKeyFromSlug($currentRoundSlug);
+                $starTime = $this->starTime($now);
+                $endTime = $starTime + 300;
+                $market_end_at = date('Y-m-d H:i:s',$endTime);//每5分钟一个轮次
                 $needsRefresh = !$task->market_end_at || $task->tail_last_triggered_round_key !== $currentRoundKey;
+
                 if ($needsRefresh) {
+
                     try {
                         $market = $this->resolveCurrentRoundMarket($gammaClient, $currentRoundSlug);
+                        // var_dump($market);
                     } catch (\Throwable $e) {
                         $this->warn("任务 {$task->id} 刷新当前轮 market 失败: {$e->getMessage()}");
                         continue;
@@ -152,7 +129,7 @@ class PmScanTailSweepCommand extends Command
                     $task->price_to_beat = (string) ($market['price_to_beat'] ?? '0');
                     $task->token_yes_id = (string) ($market['token_yes_id'] ?? '');
                     $task->token_no_id = (string) ($market['token_no_id'] ?? '');
-                    $task->market_end_at = !empty($market['end_at']) ? $market['end_at'] : null;
+                    $task->market_end_at = $market_end_at;
                     $task->tail_round_started_value = null;
                     $task->tail_last_triggered_round_key = null;
                     $task->save();
@@ -162,20 +139,12 @@ class PmScanTailSweepCommand extends Command
 
             $marketEndAt = $task->market_end_at;
             if (!$marketEndAt) {
+                var_dump(6666);
                 continue;
             }
 
-            // 距离市场结束的剩余秒数，后续所有尾盘判断都基于这个值。
             $remainingSeconds = $now->diffInSeconds($marketEndAt, false);
-            if ($remainingSeconds <= 0) {
-                // 本轮已经结束时，清空本轮起始值与触发标记，便于下一轮重新开始。
-                if ($task->tail_round_started_value !== null || $task->tail_last_triggered_round_key !== null) {
-                    $task->tail_round_started_value = null;
-                    $task->tail_last_triggered_round_key = null;
-                    $task->save();
-                }
-                continue;
-            }
+
 
             // 达到累计亏损停单阈值后，自动暂停任务并记录停单时间。
             if ($task->tail_loss_stop_count > 0 && $task->tail_loss_count >= $task->tail_loss_stop_count) {
@@ -184,13 +153,11 @@ class PmScanTailSweepCommand extends Command
                     $task->tail_loss_stopped_at = $now;
                     $task->save();
                 }
+                var_dump(8888);
                 continue;
             }
 
-            // 只有进入最后 N 秒触发窗口后，才继续做价格变化判断。
-            if ($remainingSeconds > (int) $task->tail_time_limit_seconds) {
-                continue;
-            }
+
 
             // 默认标的是 btc/usd；同一 symbol 在本轮扫描内只读取一次共享缓存。
             $symbol = $priceCache->normalizeSymbol((string) ($task->market_symbol ?: 'btc/usd'));
@@ -206,34 +173,34 @@ class PmScanTailSweepCommand extends Command
 
             $snapshot = $snapshots[$symbol];
             if (!is_array($snapshot)) {
+                var_dump(99999);
                 continue;
             }
 
-            // currentPrice 是实时价格；priceToBeat 是市场设定的结算基准价。
+            // currentPrice 是实时价格；tail_round_started_value 改为本轮开始价格。
             $currentPrice = (string) ($snapshot['value'] ?? '0');
-            $priceToBeat = (string) ($task->price_to_beat ?: '0');
-            if (!preg_match('/^\d+(\.\d+)?$/', $currentPrice) || !preg_match('/^\d+(\.\d+)?$/', $priceToBeat)) {
+            if (!preg_match('/^\d+(\.\d+)?$/', $currentPrice)) {
+                var_dump(7777);
                 continue;
             }
 
             // 以 end_at 时间戳作为轮次 key，同一轮只允许触发一次。
             $roundKey = (string) $marketEndAt->timestamp;
-            $currentDelta = bcsub($currentPrice, $priceToBeat, 8);
-            if ($task->tail_round_started_value === null) {
-                // 首次进入本轮尾盘窗口时，记录起始差值作为后续涨跌比较基准。
-                $task->tail_round_started_value = $currentDelta;
-                $task->save();
-            }
+            // var_dump($roundKey);exit;
+            // if ($task->tail_round_started_value === null) {
+            //     var_dump(99999);
+            //     $task->tail_round_started_value = $currentPrice;
+            //     $task->save();
+            // }
 
-            // 本轮已经触发过则直接跳过，避免重复下单。
-            if ($task->tail_last_triggered_round_key === $roundKey) {
-                continue;
-            }
 
-            $startDelta = (string) ($task->tail_round_started_value ?? $currentDelta);
-            // 变化量 = 当前差值 - 本轮开始差值。
-            $change = bcsub($currentDelta, $startDelta, 8);
-            $threshold = (string) ($task->tail_trigger_amount ?: '0');
+            $startPrice = $this->getStartPrice($starTime,$endTime,$symbol);
+
+
+            // 变化量 = 当前价格 - 本轮开始价格。
+            $change = bcsub($currentPrice, $startPrice, 8);
+            $threshold = (string) ($task->tail_trigger_amount ?: '100000000');
+
             if (!preg_match('/^\d+(\.\d+)?$/', $threshold) || bccomp($threshold, '0', 8) <= 0) {
                 continue;
             }
@@ -241,25 +208,35 @@ class PmScanTailSweepCommand extends Command
             $side = null;
             $tokenId = null;
             $triggerSide = null;
-            if (bccomp($change, $threshold, 8) >= 0) {
-                // 涨幅达到阈值：买上涨方向 token。
-                $side = PolymarketTradingService::SIDE_BUY;
-                $tokenId = (string) $task->token_yes_id;
-                $triggerSide = 'up';
-            } elseif (bccomp($change, bcmul($threshold, '-1', 8), 8) <= 0) {
-                // 跌幅达到阈值：买下跌方向 token。
-                $side = PolymarketTradingService::SIDE_BUY;
-                $tokenId = (string) $task->token_no_id;
-                $triggerSide = 'down';
-            }
+            //判断价格限制是否满足
+            // if(abs($change) > $threshold){
+                if ($change > 0 ) {
+                    // 涨幅达到阈值：买上涨方向 token。
+                    $side = PolymarketTradingService::SIDE_BUY;
+                    $tokenId = (string) $task->token_yes_id;
+                    $triggerSide = 'up';
+                    var_dump(2222);
+                } elseif ($change < 0) {
+                    // 跌幅达到阈值：买下跌方向 token。
+                    $side = PolymarketTradingService::SIDE_BUY;
+                    $tokenId = (string) $task->token_no_id;
+                    $triggerSide = 'down';
+                    var_dump(3333);
+                }
+            // }
+
+
+
 
             if (!$side || !$triggerSide || $tokenId === '') {
+                var_dump(!$side,!$triggerSide,$tokenId);
                 continue;
             }
 
             // 优先使用 market websocket 缓存里的 best_ask 作为买入参考价；取不到再回退到订单簿最优价。
             [$entryPrice, $entryPriceSource] = $this->resolveEntryPrice($marketInfoCache, $trading, $tokenId, $side, $books);
             if (!preg_match('/^\d+(\.\d+)?$/', $entryPrice) || bccomp($entryPrice, '0', 8) <= 0) {
+                var_dump(4444);
                 continue;
             }
 
@@ -270,6 +247,7 @@ class PmScanTailSweepCommand extends Command
                 ->where('risk_snapshot->round_key', $roundKey)
                 ->first();
             if ($existingIntent) {
+                var_dump(5555);
                 continue;
             }
 
@@ -298,9 +276,8 @@ class PmScanTailSweepCommand extends Command
                     'trigger_side' => $triggerSide,
                     'trigger_amount' => $threshold,
                     'current_price' => $currentPrice,
-                    'price_to_beat' => $priceToBeat,
-                    'current_delta' => $currentDelta,
-                    'start_delta' => $startDelta,
+                    'round_start_price' => $startPrice,
+                    'price_to_beat' => (string) ($task->price_to_beat ?: '0'),
                     'change' => $change,
                     'remaining_seconds' => $remainingSeconds,
                     'token_yes_id' => $task->token_yes_id,
@@ -315,7 +292,7 @@ class PmScanTailSweepCommand extends Command
             $task->save();
 
             // 交给统一下单执行任务异步处理。
-            PmExecuteOrderIntentJob::dispatch($intent->id);
+            PmExecuteOrderIntentJob::dispatchSync($intent->id);
             $this->info("任务 {$task->id} 已触发扫尾盘下单");
         }
     }
@@ -327,6 +304,15 @@ class PmScanTailSweepCommand extends Command
         $timestamp = strtotime($now->format('Y-m-d H:').sprintf('%02d', $targetMinutes).':00');
 
         return $baseSlug.'-'.$timestamp;
+    }
+
+    private function starTime( Carbon $now): string
+    {
+        $minutes = (int) $now->format('i');
+        $targetMinutes = (int) (floor($minutes / 5) * 5);
+        $timestamp = strtotime($now->format('Y-m-d H:').sprintf('%02d', $targetMinutes).':00');
+
+        return $timestamp;
     }
 
     private function normalizeBaseSlug(string $slug): string
@@ -356,6 +342,7 @@ class PmScanTailSweepCommand extends Command
         $store = $this->cacheStore();
         $cacheKey = $this->marketCacheKey($currentRoundSlug);
         $cached = $store->get($cacheKey);
+        $cached = ''; //临时取消缓存
         if (is_array($cached) && $cached !== []) {
             return $cached;
         }
@@ -414,5 +401,56 @@ class PmScanTailSweepCommand extends Command
         $store = config('pm.tail_sweep_scan_cache_store');
 
         return $store !== null && $store !== '' ? Cache::store($store) : Cache::store();
+    }
+
+    //获取开始时间
+    private function getStartPrice($starTime,$endTime,$symbol){
+        //请求示例:https://polymarket.com/api/crypto/crypto-price?symbol=BTC&eventStartTime=2026-03-26T01:30:00Z&variant=fiveminute&endDate=2026-03-26T01:35:00Z
+        $symbol = strtoupper(trim((string) $symbol));
+        if (str_contains($symbol, '/')) {
+            $symbol = strtoupper((string) strstr($symbol, '/', true));
+        }
+        if ($symbol === '') {
+            return '0';
+        }
+
+        $cacheKey = 'pm:tail_sweep:start_price:' . md5($symbol.'|'.$starTime.'|'.$endTime);
+        $cached = Cache::get($cacheKey);
+        if (is_string($cached) && preg_match('/^\d+(\.\d+)?$/', $cached) && bccomp($cached, '0', 8) > 0) {
+            return $cached;
+        }
+
+        $eventStartTime = Carbon::createFromTimestamp((int) $starTime, 'UTC')->format('Y-m-d\TH:i:s\Z');
+        $endDate = Carbon::createFromTimestamp((int) $endTime, 'UTC')->format('Y-m-d\TH:i:s\Z');
+
+        $client = new Client([
+            'timeout' => 15,
+            'headers' => [
+                'Accept' => 'application/json',
+                'User-Agent' => 'Mozilla/5.0',
+            ],
+        ]);
+
+        $res = $client->get('https://polymarket.com/api/crypto/crypto-price', [
+            'query' => [
+                'symbol' => $symbol,
+                'eventStartTime' => $eventStartTime,
+                'variant' => 'fiveminute',
+                'endDate' => $endDate,
+            ],
+        ]);
+
+        $json = json_decode($res->getBody()->getContents(), true);
+        if (!is_array($json)) {
+            return '0';
+        }
+
+        $price = trim((string) ($json['openPrice'] ?? ''));
+        if (preg_match('/^\d+(\.\d+)?$/', $price) && bccomp($price, '0', 8) > 0) {
+            Cache::put($cacheKey, $price, now()->addMinutes(10));
+            return $price;
+        }
+
+        return '0';
     }
 }

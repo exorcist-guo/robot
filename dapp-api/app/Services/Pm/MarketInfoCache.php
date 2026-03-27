@@ -7,22 +7,32 @@ use Illuminate\Support\Facades\Cache;
 
 class MarketInfoCache
 {
+    public function normalizeAssetId(?string $assetId): string
+    {
+        return trim((string) $assetId);
+    }
+
     public function normalizeMarketId(?string $marketId): string
     {
-        return trim((string) $marketId);
+        return $this->normalizeAssetId($marketId);
+    }
+
+    public function assetKey(?string $assetId): string
+    {
+        $normalized = $this->normalizeAssetId($assetId);
+        $key = preg_replace('/[^a-zA-Z0-9]+/', '_', $normalized);
+
+        return trim((string) $key, '_') ?: 'unknown_asset';
     }
 
     public function marketKey(?string $marketId): string
     {
-        $normalized = $this->normalizeMarketId($marketId);
-        $key = preg_replace('/[^a-zA-Z0-9]+/', '_', $normalized);
-
-        return trim((string) $key, '_') ?: 'unknown_market';
+        return $this->assetKey($marketId);
     }
 
-    public function snapshotKey(?string $marketId): string
+    public function snapshotKey(?string $assetId): string
     {
-        return 'pm:market_info:snapshot:'.$this->marketKey($marketId);
+        return 'pm:market_info:snapshot:'.$this->assetKey($assetId);
     }
 
     public function heartbeatKey(): string
@@ -52,20 +62,23 @@ class MarketInfoCache
     public function putSnapshot(array $snapshot): array
     {
         $normalized = [
-            'market_id' => $this->normalizeMarketId((string) ($snapshot['market_id'] ?? '')),
+            'asset_id' => $this->normalizeAssetId((string) ($snapshot['asset_id'] ?? $snapshot['market_id'] ?? '')),
+            'market_id' => $this->normalizeAssetId((string) ($snapshot['asset_id'] ?? $snapshot['market_id'] ?? '')),
             'event_type' => (string) ($snapshot['event_type'] ?? ''),
             'timestamp' => (int) ($snapshot['timestamp'] ?? 0),
             'received_at' => (int) ($snapshot['received_at'] ?? time()),
+            'best_bid' => is_string($snapshot['best_bid'] ?? null) ? $snapshot['best_bid'] : null,
+            'best_ask' => is_string($snapshot['best_ask'] ?? null) ? $snapshot['best_ask'] : null,
             'payload' => is_array($snapshot['payload'] ?? null) ? $snapshot['payload'] : [],
             'raw' => $snapshot['raw'] ?? null,
         ];
 
-        if ($normalized['market_id'] === '') {
-            throw new \InvalidArgumentException('market_id 不能为空');
+        if ($normalized['asset_id'] === '') {
+            throw new \InvalidArgumentException('asset_id 不能为空');
         }
 
         $this->repository()->put(
-            $this->snapshotKey($normalized['market_id']),
+            $this->snapshotKey($normalized['asset_id']),
             $normalized,
             now()->addSeconds($this->snapshotTtlSeconds())
         );
@@ -76,9 +89,9 @@ class MarketInfoCache
     /**
      * @return array<string,mixed>|null
      */
-    public function getSnapshot(?string $marketId): ?array
+    public function getSnapshot(?string $assetId): ?array
     {
-        $snapshot = $this->repository()->get($this->snapshotKey($marketId));
+        $snapshot = $this->repository()->get($this->snapshotKey($assetId));
 
         return is_array($snapshot) ? $snapshot : null;
     }
@@ -117,19 +130,19 @@ class MarketInfoCache
     }
 
     /**
-     * @param array<int,string> $marketIds
+     * @param array<int,string> $assetIds
      * @return array<int,string>
      */
-    public function putSubscribedMarkets(array $marketIds): array
+    public function putSubscribedMarkets(array $assetIds): array
     {
-        $marketIds = $this->normalizeMarketIds($marketIds);
+        $assetIds = $this->normalizeAssetIds($assetIds);
         $this->repository()->put(
             $this->subscribedMarketsKey(),
-            $marketIds,
+            $assetIds,
             now()->addSeconds($this->metadataTtlSeconds())
         );
 
-        return $marketIds;
+        return $assetIds;
     }
 
     /**
@@ -145,7 +158,7 @@ class MarketInfoCache
             'markets' => [],
         ], $heartbeat);
 
-        $payload['markets'] = $this->normalizeMarketIds(is_array($payload['markets']) ? $payload['markets'] : []);
+        $payload['markets'] = $this->normalizeAssetIds(is_array($payload['markets']) ? $payload['markets'] : []);
 
         $this->repository()->put(
             $this->heartbeatKey(),
@@ -209,13 +222,14 @@ class MarketInfoCache
                 continue;
             }
 
-            $marketId = $this->normalizeMarketId((string) ($market['market_id'] ?? ''));
-            if ($marketId === '') {
+            $assetId = $this->normalizeAssetId((string) ($market['asset_id'] ?? $market['market_id'] ?? ''));
+            if ($assetId === '') {
                 continue;
             }
 
-            $normalized[$marketId] = [
-                'market_id' => $marketId,
+            $normalized[$assetId] = [
+                'asset_id' => $assetId,
+                'market_id' => $assetId,
                 'label' => trim((string) ($market['label'] ?? '')),
             ];
         }
@@ -226,18 +240,18 @@ class MarketInfoCache
     }
 
     /**
-     * @param array<int,string> $marketIds
+     * @param array<int,string> $assetIds
      * @return array<int,string>
      */
-    private function normalizeMarketIds(array $marketIds): array
+    private function normalizeAssetIds(array $assetIds): array
     {
         $normalized = [];
-        foreach ($marketIds as $marketId) {
-            $marketId = $this->normalizeMarketId($marketId);
-            if ($marketId === '') {
+        foreach ($assetIds as $assetId) {
+            $assetId = $this->normalizeAssetId($assetId);
+            if ($assetId === '') {
                 continue;
             }
-            $normalized[] = $marketId;
+            $normalized[] = $assetId;
         }
 
         $normalized = array_values(array_unique($normalized));

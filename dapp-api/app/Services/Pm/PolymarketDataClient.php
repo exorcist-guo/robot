@@ -234,6 +234,7 @@ class PolymarketDataClient
         $payload = json_encode([
             'assets_ids' => $assetsIds,
             'type' => 'market',
+            'custom_feature_enabled' => true,
         ], JSON_UNESCAPED_SLASHES);
 
         if (!is_string($payload) || $payload === '') {
@@ -345,26 +346,79 @@ class PolymarketDataClient
             $payload = $message;
         }
 
-        $marketId = trim((string) (
-            $payload['market_id']
-            ?? $payload['market']
-            ?? $payload['asset_id']
-            ?? $payload['condition_id']
-            ?? $message['market_id']
-            ?? $message['market']
+        $assetId = trim((string) (
+            $payload['asset_id']
             ?? $message['asset_id']
-            ?? $message['condition_id']
             ?? ''
         ));
 
-        if ($marketId === '') {
+        $bestBid = $this->extractMarketPriceValue(
+            $payload['best_bid']
+            ?? $message['best_bid']
+            ?? null
+        );
+        $bestAsk = $this->extractMarketPriceValue(
+            $payload['best_ask']
+            ?? $message['best_ask']
+            ?? null
+        );
+
+        if (($eventType === 'price_change' || isset($payload['price_changes']) || isset($message['price_changes'])) && ($assetId === '' || $bestBid === null || $bestAsk === null)) {
+            $priceChanges = $payload['price_changes'] ?? $message['price_changes'] ?? [];
+            if (is_array($priceChanges)) {
+                foreach ($priceChanges as $change) {
+                    if (!is_array($change)) {
+                        continue;
+                    }
+
+                    $changeAssetId = trim((string) ($change['asset_id'] ?? ''));
+                    if ($assetId === '' && $changeAssetId !== '') {
+                        $assetId = $changeAssetId;
+                    }
+                    if ($bestBid === null) {
+                        $bestBid = $this->extractMarketPriceValue($change['best_bid'] ?? null);
+                    }
+                    if ($bestAsk === null) {
+                        $bestAsk = $this->extractMarketPriceValue($change['best_ask'] ?? null);
+                    }
+                }
+            }
+        }
+
+        if (($eventType === 'book' || isset($payload['bids']) || isset($payload['asks']) || isset($message['bids']) || isset($message['asks'])) && ($bestBid === null || $bestAsk === null)) {
+            $bids = $payload['bids'] ?? $message['bids'] ?? [];
+            $asks = $payload['asks'] ?? $message['asks'] ?? [];
+            if ($bestBid === null) {
+                $bestBid = $this->extractBestBidFromBook($bids);
+            }
+            if ($bestAsk === null) {
+                $bestAsk = $this->extractBestAskFromBook($asks);
+            }
+        }
+
+        if ($assetId === '') {
+            $assetId = trim((string) (
+                $payload['market_id']
+                ?? $payload['market']
+                ?? $payload['condition_id']
+                ?? $message['market_id']
+                ?? $message['market']
+                ?? $message['condition_id']
+                ?? ''
+            ));
+        }
+
+        if ($assetId === '') {
             return null;
         }
 
         return [
-            'market_id' => $marketId,
+            'asset_id' => $assetId,
+            'market_id' => $assetId,
             'event_type' => $eventType,
             'timestamp' => (int) ($payload['timestamp'] ?? $message['timestamp'] ?? 0),
+            'best_bid' => $bestBid,
+            'best_ask' => $bestAsk,
             'payload' => $payload,
             'raw' => $message,
         ];
@@ -433,6 +487,71 @@ class PolymarketDataClient
         $message = json_decode($frame, true);
 
         return is_array($message) ? $message : null;
+    }
+
+    private function extractMarketPriceValue(mixed $value): ?string
+    {
+        if (is_array($value)) {
+            $value = $value['price'] ?? null;
+        }
+
+        if (!is_numeric($value)) {
+            return null;
+        }
+
+        $normalized = (string) $value;
+
+        return preg_match('/^\d+(\.\d+)?$/', $normalized) ? $normalized : null;
+    }
+
+    private function extractBestBidFromBook(mixed $bids): ?string
+    {
+        if (!is_array($bids) || $bids === []) {
+            return null;
+        }
+
+        $bestBid = null;
+        foreach ($bids as $bid) {
+            if (!is_array($bid)) {
+                continue;
+            }
+
+            $price = $this->extractMarketPriceValue($bid['price'] ?? null);
+            if ($price === null) {
+                continue;
+            }
+
+            if ($bestBid === null || bccomp($price, $bestBid, 8) > 0) {
+                $bestBid = $price;
+            }
+        }
+
+        return $bestBid;
+    }
+
+    private function extractBestAskFromBook(mixed $asks): ?string
+    {
+        if (!is_array($asks) || $asks === []) {
+            return null;
+        }
+
+        $bestAsk = null;
+        foreach ($asks as $ask) {
+            if (!is_array($ask)) {
+                continue;
+            }
+
+            $price = $this->extractMarketPriceValue($ask['price'] ?? null);
+            if ($price === null) {
+                continue;
+            }
+
+            if ($bestAsk === null || bccomp($price, $bestAsk, 8) < 0) {
+                $bestAsk = $price;
+            }
+        }
+
+        return $bestAsk;
     }
 
     // 按 websocket 协议把文本 payload 打包成客户端帧后写入 socket。

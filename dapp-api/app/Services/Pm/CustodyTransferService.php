@@ -5,6 +5,7 @@ namespace App\Services\Pm;
 use App\Models\Pm\PmCustodyTransferRequest;
 use App\Models\Pm\PmCustodyWallet;
 use App\Models\Pm\PmMember;
+use App\Services\BnbChainService;
 use EthTool\Credential;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -13,7 +14,7 @@ use kornrunner\Keccak;
 class CustodyTransferService
 {
     public function __construct(
-        private readonly CustodyCipher $cipher,
+        private readonly PmPrivateKeyResolver $privateKeyResolver,
         private readonly PolygonRpcService $rpc,
     ) {}
 
@@ -28,19 +29,23 @@ class CustodyTransferService
             return $existing;
         }
 
-        $credential = Credential::new();
-        $privateKey = '0x' . ltrim($credential->getPrivateKey(), '0x');
-        $address = strtolower($credential->getAddress());
+        $generated = BnbChainService::createAddress();
+        $address = strtolower((string) ($generated['address'] ?? ''));
+        $enPrivateKey = (string) ($generated['enPrivateKey'] ?? '');
+        if (!preg_match('/^0x[a-f0-9]{40}$/', $address) || $enPrivateKey === '') {
+            throw new \RuntimeException('自动生成子钱包失败');
+        }
 
         return PmCustodyWallet::create([
             'member_id' => $member->id,
+            'address' => strtolower((string) $member->address),
             'wallet_role' => PmCustodyWallet::ROLE_SUB,
             'parent_wallet_id' => $masterWallet->id,
             'purpose' => (string) ($params['purpose'] ?? 'asset_holder'),
             'signer_address' => $address,
             'funder_address' => $masterWallet->signer_address,
-            'private_key_ciphertext' => $this->cipher->encryptString($privateKey),
-            'encryption_version' => 1,
+            'en_private_key' => $enPrivateKey,
+            'encryption_version' => 2,
             'signature_type' => 0,
             'exchange_nonce' => '0',
             'status' => PmCustodyWallet::STATUS_ENABLED,
@@ -57,24 +62,23 @@ class CustodyTransferService
             return $wallet;
         }
 
-        $privateKey = trim((string) config('pm.sponsor_private_key'));
-        if ($privateKey === '') {
-            throw new \RuntimeException('PM_SPONSOR_PRIVATE_KEY 未配置');
+        $generated = BnbChainService::createAddress();
+        $signerAddress = strtolower((string) ($generated['address'] ?? ''));
+        $enPrivateKey = (string) ($generated['enPrivateKey'] ?? '');
+        if (!preg_match('/^0x[a-f0-9]{40}$/', $signerAddress) || $enPrivateKey === '') {
+            throw new \RuntimeException('自动生成主钱包失败');
         }
-
-        $privateKey = $this->normalizePrivateKey($privateKey);
-        $credential = Credential::fromKey(ltrim($privateKey, '0x'));
-        $address = strtolower($credential->getAddress());
 
         return PmCustodyWallet::create([
             'member_id' => $member->id,
+            'address' => strtolower((string) $member->address),
             'wallet_role' => PmCustodyWallet::ROLE_MASTER,
             'parent_wallet_id' => null,
-            'purpose' => 'gas_sponsor',
-            'signer_address' => $address,
-            'funder_address' => $address,
-            'private_key_ciphertext' => $this->cipher->encryptString($privateKey),
-            'encryption_version' => 1,
+            'purpose' => 'polymarket_signer',
+            'signer_address' => $signerAddress,
+            'funder_address' => $signerAddress,
+            'en_private_key' => $enPrivateKey,
+            'encryption_version' => 2,
             'signature_type' => 0,
             'exchange_nonce' => '0',
             'status' => PmCustodyWallet::STATUS_ENABLED,
@@ -197,7 +201,7 @@ class CustodyTransferService
             throw new \RuntimeException('子钱包签名校验失败');
         }
 
-        $masterPrivateKey = $this->cipher->decryptString($masterWallet->private_key_ciphertext);
+        $masterPrivateKey = $this->privateKeyResolver->resolve($masterWallet);
         $credential = Credential::fromKey(ltrim($masterPrivateKey, '0x'));
         $from = strtolower($credential->getAddress());
         $nonce = $this->rpc->getTransactionCount($from, 'pending');
@@ -263,7 +267,7 @@ class CustodyTransferService
             throw new \RuntimeException('签名钱包不存在');
         }
 
-        $privateKey = $this->normalizePrivateKey($this->cipher->decryptString($wallet->private_key_ciphertext));
+        $privateKey = $this->normalizePrivateKey($this->privateKeyResolver->resolve($wallet));
         $credential = Credential::fromKey(ltrim($privateKey, '0x'));
 
         return strtolower($credential->getAddress()) === strtolower($expectedSigner)
@@ -272,7 +276,7 @@ class CustodyTransferService
 
     private function signPayload(PmCustodyWallet $wallet, array $payload): string
     {
-        $privateKey = $this->normalizePrivateKey($this->cipher->decryptString($wallet->private_key_ciphertext));
+        $privateKey = $this->normalizePrivateKey($this->privateKeyResolver->resolve($wallet));
         return $this->signPayloadHex($privateKey, $payload);
     }
 
@@ -318,6 +322,7 @@ class CustodyTransferService
     {
         return [
             'id' => $wallet->id,
+            'address' => $wallet->address,
             'wallet_role' => $wallet->wallet_role,
             'signer_address' => $wallet->signer_address,
             'funder_address' => $wallet->funder_address,

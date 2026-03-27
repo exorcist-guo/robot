@@ -13,7 +13,6 @@ use App\Services\Pm\GammaClient;
 use App\Services\Pm\PolymarketTradingService;
 use App\Traits\ApiResponseTrait;
 use Illuminate\Http\Request;
-use kornrunner\Ethereum\Address;
 
 class WalletController extends Controller
 {
@@ -27,83 +26,11 @@ class WalletController extends Controller
     }
 
     /**
-     * 导入私钥（托管）
-     *
-     * 入参：private_key（0x... 或 64 hex）
+     * PM 托管钱包已改为登录自动创建。
      */
-    public function import(Request $request, CustodyCipher $cipher, GammaClient $gamma)
+    public function import(Request $request)
     {
-        $member = $this->currentMember($request);
-
-        $privateKey = trim((string) $request->input('private_key', ''));
-        if ($privateKey === '') {
-            return $this->error('private_key 必填');
-        }
-        if (str_starts_with(strtolower($privateKey), '0x')) {
-            $privateKey = substr($privateKey, 2);
-        }
-        $privateKey = strtolower($privateKey);
-
-        if (!ctype_xdigit($privateKey) || strlen($privateKey) !== 64) {
-            return $this->error('private_key 格式不正确');
-        }
-
-        // 推导 signer 地址
-        $addr = new Address($privateKey);
-        $signerAddress = '0x' . $addr->get();
-        $signerAddress = strtolower($signerAddress);
-
-        // 要求导入私钥必须与登录地址一致（降低风险）
-        if (strtolower($member->address) !== $signerAddress) {
-            return $this->error('导入私钥地址与当前登录地址不一致');
-        }
-
-        // 解析 funder/proxyWallet（用于后续下单 maker/funder）
-        // 这里允许 Gamma 查询失败：失败时先退化为 signer=funder，避免导入私钥被外部 profile 接口阻塞。
-        $profile = [];
-        $proxyWallet = null;
-        $funder = $signerAddress;
-
-        try {
-            $profile = $gamma->getPublicProfile($signerAddress);
-            $proxyWallet = $profile['proxyWallet'] ?? $profile['proxy_wallet'] ?? null;
-            if (is_string($proxyWallet) && EthSignature::isAddress($proxyWallet)) {
-                $funder = strtolower($proxyWallet);
-            }
-        } catch (\Throwable $e) {
-            // ignore: 无法获取 profile 时，先使用 signer 作为 funder
-        }
-
-        $ciphertext = $cipher->encryptString('0x' . $privateKey);
-
-        $wallet = PmCustodyWallet::updateOrCreate(
-            [
-                'member_id' => $member->id,
-                'wallet_role' => PmCustodyWallet::ROLE_MASTER,
-            ],
-            [
-                'parent_wallet_id' => null,
-                'purpose' => 'polymarket_signer',
-                'signer_address' => $signerAddress,
-                'funder_address' => $funder,
-                'private_key_ciphertext' => $ciphertext,
-                'encryption_version' => 1,
-                // 默认 EOA；如果未来识别到 Safe/Proxy，再改为 1/2
-                'signature_type' => 0,
-                'exchange_nonce' => '0',
-                'status' => 1,
-            ]
-        );
-
-        return $this->success('ok', [
-            'wallet' => [
-                'id' => $wallet->id,
-                'signer_address' => $wallet->signer_address,
-                'funder_address' => $wallet->funder_address,
-                'signature_type' => $wallet->signature_type,
-            ],
-            'profile' => $profile,
-        ]);
+        return $this->error('PM 托管钱包已改为登录自动创建，无需再导入私钥');
     }
 
     public function status(Request $request)
@@ -117,6 +44,7 @@ class WalletController extends Controller
         return $this->success('ok', [
             'has_wallet' => (bool) $wallet,
             'wallet' => $wallet ? [
+                'address' => $wallet->address,
                 'signer_address' => $wallet->signer_address,
                 'funder_address' => $wallet->funder_address,
                 'signature_type' => $wallet->signature_type,
@@ -137,6 +65,7 @@ class WalletController extends Controller
         return $this->success('ok', [
             'wallet' => [
                 'id' => $wallet->id,
+                'address' => $wallet->address,
                 'wallet_role' => $wallet->wallet_role,
                 'signer_address' => $wallet->signer_address,
                 'funder_address' => $wallet->funder_address,
@@ -226,7 +155,7 @@ class WalletController extends Controller
             ->first();
 
         if (!$wallet) {
-            return $this->error('请先导入托管钱包');
+            return $this->error('PM 托管钱包不存在，请重新登录后重试');
         }
 
         $side = strtoupper((string) $request->input('side', PolymarketTradingService::SIDE_BUY));
@@ -240,6 +169,7 @@ class WalletController extends Controller
         return $this->success('ok', [
             'has_wallet' => true,
             'wallet' => [
+                'address' => $wallet->address,
                 'signer_address' => $wallet->signer_address,
                 'funder_address' => $wallet->funder_address,
                 'signature_type' => $wallet->signature_type,
@@ -260,7 +190,7 @@ class WalletController extends Controller
             ->first();
 
         if (!$wallet) {
-            return $this->error('请先导入托管钱包');
+            return $this->error('PM 托管钱包不存在，请重新登录后重试');
         }
 
         $side = strtoupper((string) $request->input('side', PolymarketTradingService::SIDE_BUY));
@@ -269,7 +199,11 @@ class WalletController extends Controller
             return $this->error('SELL 授权需要 token_id');
         }
 
-        $result = $trading->approveForSide($wallet, $side, $tokenId !== '' ? $tokenId : null);
+        try {
+            $result = $trading->approveForSide($wallet, $side, $tokenId !== '' ? $tokenId : null);
+        } catch (\Throwable $e) {
+            return $this->error('授权失败: ' . $e->getMessage());
+        }
 
         return $this->success(($result['already_approved'] ?? false) ? '当前已授权，无需重复操作' : '授权交易已提交', $result);
     }
