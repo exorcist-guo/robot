@@ -65,6 +65,7 @@ Route::middleware('auth:sanctum')->group(function () {
     // me
     Route::get('/me', [MeController::class, 'profile']);
     Route::get('/me/records', [MeController::class, 'records']);
+    Route::get('/me/records/{id}', [MeController::class, 'recordDetail']);
 
     // community
     Route::get('/community/summary', [CommunityController::class, 'summary']);

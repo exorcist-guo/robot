@@ -4,6 +4,8 @@ import HomePage from '../pages/HomePage.vue'
 import CommunityPage from '../pages/CommunityPage.vue'
 import MePage from '../pages/MePage.vue'
 import CopyTasksPage from '../pages/CopyTasksPage.vue'
+import RecordsPage from '../pages/RecordsPage.vue'
+import RecordDetailPage from '../pages/RecordDetailPage.vue'
 import MainLayout from '../layouts/MainLayout.vue'
 
 const router = createRouter({
@@ -21,6 +23,8 @@ const router = createRouter({
       ],
     },
     { path: '/copy-tasks', component: CopyTasksPage },
+    { path: '/records', component: RecordsPage },
+    { path: '/records/:id', component: RecordDetailPage },
   ],
 })
 

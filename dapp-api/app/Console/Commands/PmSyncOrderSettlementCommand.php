@@ -2,7 +2,6 @@
 
 namespace App\Console\Commands;
 
-use App\Jobs\PmAutoClaimOrderWinningsJob;
 use App\Models\Pm\PmOrder;
 use App\Services\Pm\PmOrderSettlementSyncService;
 use Illuminate\Console\Command;
@@ -40,7 +39,12 @@ class PmSyncOrderSettlementCommand extends Command
 
         if ((bool) $this->option('only-unsettled')) {
             $query->where(function ($q) {
-                $q->whereNull('is_settled')->orWhere('is_settled', false);
+                $q->whereNull('is_settled')
+                    ->orWhere('is_settled', false)
+                    ->orWhere(function ($claimQuery) {
+                        $claimQuery->where('claim_status', PmOrder::CLAIM_STATUS_CLAIMING)
+                            ->whereNull('claim_completed_at');
+                    });
             });
         }
 
@@ -63,10 +67,6 @@ class PmSyncOrderSettlementCommand extends Command
                         'result' => $result,
                     ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
                     continue;
-                }
-
-                if ($queueClaim && (int) $order->fresh()->claim_status === PmOrder::CLAIM_STATUS_PENDING) {
-                    PmAutoClaimOrderWinningsJob::dispatch($order->id);
                 }
 
                 $this->info("已同步订单 {$order->id} / {$order->poly_order_id}");

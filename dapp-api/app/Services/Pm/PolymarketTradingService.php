@@ -113,13 +113,66 @@ class PolymarketTradingService
     /**
      * @return array<string,mixed>
      */
-    public function evaluateSlippage(string $tokenId, string $side, string $leaderPrice, int $maxSlippageBps): array
+    public function evaluateSlippage(string $tokenId, string $side, string $leaderPrice, int $maxSlippageBps, ?string $amount = null, ?string $bookPrice = null): array
     {
         if ($maxSlippageBps <= 0) {
             return ['passed' => true, 'book_price' => null, 'slippage_bps' => 0];
         }
 
-        $book = $this->factory->makeReadClient()->clob()->book()->get($tokenId);
+        if ($bookPrice !== null && $this->isPositiveDecimal($bookPrice)) {
+            $leader = BigDecimal::of($leaderPrice);
+            if ($leader->isLessThanOrEqualTo(BigDecimal::zero())) {
+                return ['passed' => true, 'book_price' => $bookPrice, 'slippage_bps' => 0, 'is_marketable' => true];
+            }
+
+            $price = BigDecimal::of($bookPrice);
+            $diff = $price->minus($leader)->abs();
+            $bps = (int) $diff
+                ->dividedBy($leader, 8, RoundingMode::HALF_UP)
+                ->multipliedBy('10000')
+                ->toScale(0, RoundingMode::HALF_UP)
+                ->__toString();
+
+            return [
+                'passed' => $bps <= $maxSlippageBps,
+                'book_price' => $bookPrice,
+                'slippage_bps' => $bps,
+                'is_marketable' => true,
+            ];
+        }
+
+        if ($amount !== null && $this->isPositiveDecimal($amount)) {
+            $marketPrice = $this->getOrderBookMarketPrice($tokenId, $side, $amount);
+            $best = isset($marketPrice['price']) ? (string) $marketPrice['price'] : null;
+            if ($best === null || !preg_match('/^\d+(\.\d+)?$/', $best)) {
+                return ['passed' => true, 'book_price' => null, 'slippage_bps' => 0];
+            }
+
+            $leader = BigDecimal::of($leaderPrice);
+            if ($leader->isLessThanOrEqualTo(BigDecimal::zero())) {
+                return ['passed' => true, 'book_price' => $best, 'slippage_bps' => 0, 'is_marketable' => true];
+            }
+
+            $bookPrice = BigDecimal::of($best);
+            $diff = $bookPrice->minus($leader)->abs();
+            $bps = (int) $diff
+                ->dividedBy($leader, 8, RoundingMode::HALF_UP)
+                ->multipliedBy('10000')
+                ->toScale(0, RoundingMode::HALF_UP)
+                ->__toString();
+
+            return [
+                'passed' => $bps <= $maxSlippageBps,
+                'book_price' => $best,
+                'slippage_bps' => $bps,
+                'is_marketable' => true,
+            ];
+        }
+
+        $book = $this->withTransientClobRetry(
+            fn () => $this->factory->makeReadClient()->clob()->book()->get($tokenId),
+            '读取 Polymarket orderbook 失败'
+        );
         $isMarketable = $this->isMarketableOrder($side, $leaderPrice, is_array($book) ? $book : []);
         $levels = match (strtoupper($side)) {
             self::SIDE_BUY => $isMarketable ? ($book['asks'] ?? []) : ($book['bids'] ?? []),
@@ -153,11 +206,14 @@ class PolymarketTradingService
     }
 
     /**
-     * @return array<string,mixed>
+     * @return array{book: array<string,mixed>, price: ?string, min_size: ?string}
      */
     public function getOrderBookBestPrice(string $tokenId, string $side): array
     {
-        $book = $this->factory->makeReadClient()->clob()->book()->get($tokenId);
+        $book = $this->withTransientClobRetry(
+            fn () => $this->factory->makeReadClient()->clob()->book()->get($tokenId),
+            '读取 Polymarket orderbook 失败'
+        );
         $levels = match (strtoupper($side)) {
             self::SIDE_BUY => $book['asks'] ?? [],
             self::SIDE_SELL => $book['bids'] ?? [],
@@ -168,6 +224,80 @@ class PolymarketTradingService
         return [
             'book' => is_array($book) ? $book : [],
             'price' => $best,
+            'min_size' => isset($book['min_order_size']) ? (string) $book['min_order_size'] : null,
+        ];
+    }
+
+    /**
+     * 按订单簿深度估算可立即成交的市价参考价。
+     * BUY 按 USDC 金额吃 asks；SELL 按 token 数量吃 bids。
+     *
+     * @return array<string,mixed>
+     */
+    public function getOrderBookMarketPrice(string $tokenId, string $side, string $amount, ?string $size = null): array
+    {
+        $book = $this->withTransientClobRetry(
+            fn () => $this->factory->makeReadClient()->clob()->book()->get($tokenId),
+            '读取 Polymarket orderbook 失败'
+        );
+        $levels = match (strtoupper($side)) {
+            self::SIDE_BUY => $book['asks'] ?? [],
+            self::SIDE_SELL => $book['bids'] ?? [],
+            default => [],
+        };
+
+        if (!is_array($levels) || $levels === []) {
+            return [
+                'book' => is_array($book) ? $book : [],
+                'price' => null,
+                'depth_reached' => false,
+                'min_size' => isset($book['min_order_size']) ? (string) $book['min_order_size'] : null,
+            ];
+        }
+
+        usort($levels, static function (array $a, array $b) use ($side): int {
+            $priceA = is_string($a['price'] ?? null) ? (float) $a['price'] : 0.0;
+            $priceB = is_string($b['price'] ?? null) ? (float) $b['price'] : 0.0;
+
+            return strtoupper($side) === self::SIDE_BUY
+                ? $priceA <=> $priceB
+                : $priceB <=> $priceA;
+        });
+
+        $remaining = BigDecimal::of($amount);
+        $marketPrice = null;
+
+        foreach ($levels as $level) {
+            $price = isset($level['price']) ? trim((string) $level['price']) : '';
+            $levelSize = isset($level['size']) ? trim((string) $level['size']) : '';
+            if (!$this->isPositiveDecimal($price) || !$this->isPositiveDecimal($levelSize)) {
+                continue;
+            }
+
+            $priceDec = BigDecimal::of($price);
+            $sizeDec = BigDecimal::of($levelSize);
+            $consumable = strtoupper($side) === self::SIDE_BUY
+                ? $priceDec->multipliedBy($sizeDec)
+                : $sizeDec;
+
+            $marketPrice = $price;
+            if ($remaining->isLessThanOrEqualTo($consumable)) {
+                return [
+                    'book' => is_array($book) ? $book : [],
+                    'price' => $marketPrice,
+                    'depth_reached' => true,
+                    'min_size' => isset($book['min_order_size']) ? (string) $book['min_order_size'] : null,
+                ];
+            }
+
+            $remaining = $remaining->minus($consumable);
+        }
+
+        return [
+            'book' => is_array($book) ? $book : [],
+            'price' => $marketPrice,
+            'depth_reached' => false,
+            'min_size' => isset($book['min_order_size']) ? (string) $book['min_order_size'] : null,
         ];
     }
 
@@ -537,16 +667,16 @@ class PolymarketTradingService
         $feeResp = $client->clob()->server()->getFeeRate($tokenId);
         $book = $this->factory->makeReadClient()->clob()->book()->get($tokenId);
         $defaultFeeRateBps = (string) config('pm.default_fee_rate_bps', '1000');
-        $makerFeeRateBps = (string) config('pm.maker_fee_rate_bps', '0');
+        $makerFeeRateBps = (string) config('pm.maker_fee_rate_bps', '1000');
         $takerFeeRateBps = (string) config('pm.taker_fee_rate_bps', '1000');
         $feeRateBps = (string) ($params['fee_rate_bps']
             ?? $feeResp['feeRateBps']
             ?? $feeResp['fee_rate_bps']
             ?? null);
         if (!preg_match('/^\d+$/', $feeRateBps) || $feeRateBps === '0') {
-            $feeRateBps = $this->isMarketableOrder($side, $price, is_array($book) ? $book : [])
+            $feeRateBps = strtoupper($side) === self::SIDE_BUY
                 ? $takerFeeRateBps
-                : $makerFeeRateBps;
+                : ($this->isMarketableOrder($side, $price, is_array($book) ? $book : []) ? $takerFeeRateBps : $makerFeeRateBps);
         }
         if (!preg_match('/^\d+$/', $feeRateBps)) {
             $feeRateBps = $defaultFeeRateBps;
@@ -685,7 +815,10 @@ class PolymarketTradingService
     public function isTokenTradable(string $tokenId): bool
     {
         try {
-            $book = $this->factory->makeReadClient()->clob()->book()->get($tokenId);
+            $book = $this->withTransientClobRetry(
+                fn () => $this->factory->makeReadClient()->clob()->book()->get($tokenId),
+                '读取 Polymarket orderbook 失败'
+            );
         } catch (\Throwable $e) {
             $message = $e->getMessage();
             if (str_contains($message, 'No orderbook exists for the requested token id')) {

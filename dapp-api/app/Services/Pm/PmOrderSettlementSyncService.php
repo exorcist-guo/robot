@@ -6,6 +6,7 @@ use App\Models\Pm\PmCopyTask;
 use App\Models\Pm\PmOrder;
 use Brick\Math\BigDecimal;
 use Brick\Math\RoundingMode;
+use Illuminate\Support\Carbon;
 use Throwable;
 
 class PmOrderSettlementSyncService
@@ -33,6 +34,8 @@ class PmOrderSettlementSyncService
         $remote = $this->fetchRemoteOrderSnapshot($order, $wallet);
         $snapshot = $this->buildSettlementSnapshot($order, $remote);
         $snapshot = $this->syncClaimReceiptState($order, $snapshot);
+        $snapshot = $this->preserveConfirmedClaimWithoutSettlement($order, $snapshot, $remote);
+        $snapshot = $this->normalizeClaimState($snapshot);
 
         if ($dryRun) {
             return ['updated' => false, 'dry_run' => true, 'snapshot' => $snapshot, 'remote' => $remote];
@@ -235,7 +238,6 @@ class PmOrderSettlementSyncService
     private function resolveSettlement(PmOrder $order, array $remote): array
     {
         $intent = $order->intent;
-        $task = $intent?->copyTask;
         $conditionId = $this->resolveConditionId($order, $remote);
         if ($conditionId === null) {
             return [false, null, null, [], null];
@@ -259,7 +261,7 @@ class PmOrderSettlementSyncService
             }
         }
 
-        $marketEndAt = $task?->market_end_at;
+        $marketEndAt = $this->orderMarketEndAt($order, $market);
         $isSettled = $winningOutcome !== null && ($marketEndAt === null || now()->gte($marketEndAt));
 
         return [
@@ -391,6 +393,170 @@ class PmOrderSettlementSyncService
     }
 
     /**
+     * @param array<string,mixed> $snapshot
+     * @return array<string,mixed>
+     */
+    private function normalizeClaimState(array $snapshot): array
+    {
+        $profitUsdc = isset($snapshot['profit_usdc']) ? (int) $snapshot['profit_usdc'] : null;
+        $claimStatus = isset($snapshot['claim_status']) ? (int) $snapshot['claim_status'] : PmOrder::CLAIM_STATUS_NOT_NEEDED;
+
+        if ($profitUsdc === null || $profitUsdc <= 0) {
+            $snapshot['claimable_usdc'] = 0;
+            $snapshot['claim_status'] = PmOrder::CLAIM_STATUS_NOT_NEEDED;
+            $snapshot['claim_completed_at'] = null;
+            $snapshot['claim_last_error'] = null;
+            return $snapshot;
+        }
+
+        if (!in_array($claimStatus, [
+            PmOrder::CLAIM_STATUS_PENDING,
+            PmOrder::CLAIM_STATUS_CLAIMING,
+            PmOrder::CLAIM_STATUS_CLAIMED,
+            PmOrder::CLAIM_STATUS_FAILED,
+            PmOrder::CLAIM_STATUS_SKIPPED,
+        ], true)) {
+            $snapshot['claim_status'] = PmOrder::CLAIM_STATUS_PENDING;
+        }
+
+        return $snapshot;
+    }
+
+    /**
+     * @param array<int,mixed> $tokens
+     */
+    private function marketMatchesCondition(array $market, string $conditionId, array $tokens = []): bool
+    {
+        $marketConditionId = strtolower((string) ($market['conditionId'] ?? $market['condition_id'] ?? ''));
+        if ($marketConditionId !== '' && $marketConditionId === $conditionId) {
+            return true;
+        }
+
+        if ($tokens === []) {
+            $tokens = $this->extractMarketTokens($market);
+        }
+
+        foreach ($tokens as $token) {
+            if (is_array($token) && ($token['winner'] ?? false) === true) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function orderMarketEndAt(PmOrder $order, array $market = []): ?Carbon
+    {
+        $taskMarketEndAt = $order->intent?->copyTask?->market_end_at;
+        if ($taskMarketEndAt instanceof Carbon) {
+            return $taskMarketEndAt;
+        }
+
+        $candidates = [
+            $market['endDate'] ?? null,
+            $market['end_date'] ?? null,
+            $market['closedTime'] ?? null,
+            $market['closed_time'] ?? null,
+        ];
+
+        foreach ($candidates as $candidate) {
+            if (!is_string($candidate) || trim($candidate) === '') {
+                continue;
+            }
+
+            try {
+                return Carbon::parse($candidate);
+            } catch (Throwable) {
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param array<string,mixed> $snapshot
+     * @param array<string,mixed> $remote
+     * @return array<string,mixed>
+     */
+    private function preserveConfirmedClaimWithoutSettlement(PmOrder $order, array $snapshot, array $remote): array
+    {
+        if (($snapshot['claim_status'] ?? null) !== PmOrder::CLAIM_STATUS_CLAIMED) {
+            return $snapshot;
+        }
+
+        if (($snapshot['is_settled'] ?? false) === true) {
+            return $snapshot;
+        }
+
+        $conditionId = $this->resolveConditionId($order, $remote);
+        if ($conditionId === null) {
+            return $snapshot;
+        }
+
+        $market = $this->fetchResolvedMarket($conditionId, $order);
+        if (!is_array($market) || $market === []) {
+            return $snapshot;
+        }
+
+        $tokens = $this->extractMarketTokens($market);
+        if ($tokens === [] || ! $this->marketMatchesCondition($market, $conditionId, $tokens)) {
+            return $snapshot;
+        }
+
+        $winningOutcome = null;
+        foreach ($tokens as $token) {
+            if (is_array($token) && ($token['winner'] ?? false) === true) {
+                $winningOutcome = $this->normalizeOutcome((string) ($token['outcome'] ?? ''));
+                break;
+            }
+        }
+
+        if ($winningOutcome === null) {
+            return $snapshot;
+        }
+
+        $marketEndAt = $this->orderMarketEndAt($order, $market);
+        if ($marketEndAt !== null && now()->lt($marketEndAt)) {
+            return $snapshot;
+        }
+
+        $filledSize = $snapshot['filled_size'] ?? null;
+        $orderPrice = $snapshot['order_price'] ?? null;
+        $outcome = $this->normalizeOutcome((string) ($snapshot['outcome'] ?? ''));
+        $positionNotionalUsdc = $snapshot['position_notional_usdc'] ?? null;
+        $isWin = $winningOutcome === $outcome;
+        $pnlUsdc = $this->calculateSettledPnlUsdc($filledSize, $orderPrice, $isWin);
+        $profitUsdc = max(0, (int) $pnlUsdc);
+        $roiBps = null;
+        if ($positionNotionalUsdc !== null && (int) $positionNotionalUsdc > 0) {
+            $roiBps = (int) BigDecimal::of((string) $pnlUsdc)
+                ->dividedBy((string) $positionNotionalUsdc, 8, RoundingMode::HALF_UP)
+                ->multipliedBy('10000')
+                ->toScale(0, RoundingMode::HALF_UP)
+                ->__toString();
+        }
+
+        $snapshot['is_settled'] = true;
+        $snapshot['settled_at'] = $snapshot['settled_at'] ?? now();
+        $snapshot['winning_outcome'] = $winningOutcome;
+        $snapshot['settlement_source'] = 'claim_receipt_recovered';
+        $snapshot['pnl_usdc'] = $pnlUsdc;
+        $snapshot['profit_usdc'] = $profitUsdc;
+        $snapshot['roi_bps'] = $roiBps;
+        $snapshot['is_win'] = $isWin;
+        $snapshot['claimable_usdc'] = $profitUsdc > 0 ? $profitUsdc : 0;
+        $snapshot['settlement_payload'] = [
+            'condition_id' => $conditionId,
+            'market' => $market,
+            'market_tokens' => $tokens,
+            'remote_order' => $remote,
+            'recovered_from' => 'confirmed_claim_receipt',
+        ];
+
+        return $snapshot;
+    }
+
+    /**
      * @param array<int,mixed> $candidates
      */
     private function pickDecimal(array $candidates): ?string
@@ -469,7 +635,7 @@ class PmOrderSettlementSyncService
     {
         try {
             $market = $this->factory->makeReadClient()->clob()->markets()->get($conditionId);
-            if (is_array($market) && $market !== []) {
+            if (is_array($market) && $market !== [] && $this->marketMatchesCondition($market, $conditionId)) {
                 return $market;
             }
         } catch (Throwable) {

@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
 
+const router = useRouter()
 const store = useAppStore()
 
 const formattedAvailableBalance = computed(() => {
@@ -31,6 +33,23 @@ const formattedAvailableBalance = computed(() => {
     maximumFractionDigits: 6,
   })} USDC.E`
 })
+
+const formatFilledUsdc = (value: unknown) => {
+  const amount = Number(value)
+  if (Number.isNaN(amount)) return '0.00'
+  return (amount / 1_000_000).toLocaleString('zh-CN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })
+}
+
+const openRecordDetail = (id: number | string) => {
+  router.push(`/records/${id}`)
+}
+
+const openRecords = () => {
+  router.push('/records')
+}
 
 onMounted(async () => {
   await Promise.all([
@@ -85,15 +104,17 @@ onMounted(async () => {
     <section>
       <div class="section-header">
         <h2 class="section-title">最近记录</h2>
-        <span class="info-chip">{{ store.home?.recent_orders?.length || 0 }} 条</span>
+        <van-button size="small" plain type="primary" @click="openRecords">查看更多</van-button>
       </div>
       <van-cell-group v-if="store.home?.recent_orders?.length" inset>
         <van-cell
           v-for="item in store.home?.recent_orders || []"
-          :key="item.order_id"
-          :title="item.leader?.display_name || item.leader?.proxy_wallet || '未知对象'"
-          :label="`${item.trade?.side || ''} / ${item.trade?.price || ''} / ${item.status_text || ''}${item.failure_category ? ' / ' + item.failure_category : ''}${item.is_retryable ? ' / 可重试' : ''}`"
-          :value="item.filled_usdc"
+          :key="item.id || item.order_id"
+          is-link
+          :title="`ID：${item.id || item.order_id}`"
+          :label="`方向：${item.direction_text || item.direction || '-'} / 状态：${item.settlement_view_text || item.status_text || '-'}`"
+          :value="formatFilledUsdc(item.filled_usdc)"
+          @click="openRecordDetail(item.id || item.order_id)"
         />
       </van-cell-group>
       <div v-else class="surface-card empty-state">暂无最近记录，开始创建跟单任务后会显示在这里。</div>

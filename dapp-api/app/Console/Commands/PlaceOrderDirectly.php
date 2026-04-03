@@ -249,7 +249,7 @@ class PlaceOrderDirectly extends Command
             }
 
             // 优先使用 market websocket 缓存里的 best_ask 作为买入参考价；取不到再回退到订单簿最优价。
-            [$entryPrice, $entryPriceSource] = $this->resolveEntryPrice($marketInfoCache, $trading, $tokenId, $side, $books);
+            [$entryPrice, $entryPriceSource] = $this->resolveEntryPrice($trading, $tokenId, $side, (string) $task->tail_order_usdc, $books);
             if (!preg_match('/^\d+(\.\d+)?$/', $entryPrice) || bccomp($entryPrice, '0', 8) <= 0) {
                 var_dump($entryPrice,$entryPriceSource,44444);
                 continue;
@@ -388,26 +388,17 @@ class PlaceOrderDirectly extends Command
     }
 
     private function resolveEntryPrice(
-        MarketInfoCache $marketInfoCache,
         PolymarketTradingService $trading,
         string $tokenId,
         string $side,
+        string $targetUsdc,
         array &$books
     ): array {
-        if ($side === PolymarketTradingService::SIDE_BUY) {
-            $marketSnapshot = $marketInfoCache->getSnapshot($tokenId);
-            if ($marketInfoCache->isFresh($marketSnapshot)) {
-                $bestAsk = (string) ($marketSnapshot['best_ask'] ?? '');
-                if (preg_match('/^\d+(\.\d+)?$/', $bestAsk) && bccomp($bestAsk, '0', 8) > 0) {
-                    return [$bestAsk, 'market_cache_best_ask'];
-                }
-            }
-        }
-
-        $bookKey = $tokenId.'|'.$side;
+        $bookKey = $tokenId.'|'.$side.'|'.$targetUsdc;
         if (!isset($books[$bookKey])) {
             try {
-                $books[$bookKey] = $trading->getOrderBookBestPrice($tokenId, $side);
+                $amount = bcdiv($targetUsdc, '1000000', 6);
+                $books[$bookKey] = $trading->getOrderBookMarketPrice($tokenId, $side, $amount);
             } catch (\Throwable $e) {
                 if (str_contains($e->getMessage(), 'No orderbook exists for the requested token id')) {
                     $books[$bookKey] = ['price' => '0', 'book' => []];
@@ -417,7 +408,7 @@ class PlaceOrderDirectly extends Command
             }
         }
 
-        return [(string) ($books[$bookKey]['price'] ?? '0'), 'orderbook_best_price'];
+        return [(string) ($books[$bookKey]['price'] ?? '0'), 'orderbook_market_price'];
     }
 
     private function daemonLockKey(): string

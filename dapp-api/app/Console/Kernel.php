@@ -32,6 +32,9 @@ class Kernel extends ConsoleKernel
      */
     protected function schedule(Schedule $schedule): void
     {
+        $schedule->command('pm:sync-order-settlement --only-unsettled --queue-claim')
+        ->everyMinute()
+        ->withoutOverlapping();
     }
 
     /**

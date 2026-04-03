@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Jobs\PmSyncOrderSettlementJob;
 use App\Models\Pm\PmOrder;
 use App\Services\Pm\PmOrderSettlementSyncService;
 use Illuminate\Bus\Queueable;
@@ -25,6 +26,12 @@ class PmSyncOrderStatusJob implements ShouldQueue
             return;
         }
 
-        $service->sync($order);
+        $result = $service->sync($order);
+        $snapshot = is_array($result['snapshot'] ?? null) ? $result['snapshot'] : [];
+        $localStatus = (int) ($snapshot['local_status'] ?? $order->status);
+
+        if (in_array($localStatus, [PmOrder::STATUS_FILLED, PmOrder::STATUS_PARTIAL], true)) {
+            PmSyncOrderSettlementJob::dispatch($order->id, true);
+        }
     }
 }
