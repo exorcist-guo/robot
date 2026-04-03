@@ -325,6 +325,7 @@ class PmExecuteOrderIntentJob implements ShouldQueue
             'order_type' => (bool) ($riskSnapshot['allow_partial_fill'] ?? true) ? 'GTC' : 'FOK',
             'defer_exec' => false,
             'expiration' => '0',
+            'nonce' => '0',
         ];
 
         $requestContext = array_filter([
@@ -350,8 +351,6 @@ class PmExecuteOrderIntentJob implements ShouldQueue
         ], static fn ($value) => $value !== null);
 
         try {
-            $reservedNonce = $trading->reserveExchangeNonce($wallet);
-            $requestPayload['nonce'] = $reservedNonce;
             $result = $trading->placeOrder($wallet, $requestPayload);
 
             $remoteStatus = $this->mapRemoteStatus($result['response'] ?? []);
@@ -368,7 +367,7 @@ class PmExecuteOrderIntentJob implements ShouldQueue
                     'last_sync_at' => now(),
                     'filled_usdc' => $filledUsdc,
                     'avg_price' => $normalizedPrice,
-                    'exchange_nonce' => $reservedNonce,
+                    'exchange_nonce' => (string) ($result['request']['payload']['order']['nonce'] ?? '0'),
                     'failure_category' => null,
                     'is_retryable' => false,
                     'retry_count' => 0,
@@ -390,7 +389,7 @@ class PmExecuteOrderIntentJob implements ShouldQueue
                 ['order_intent_id' => $intent->id],
                 [
                     'status' => PmOrder::STATUS_ERROR,
-                    'request_payload' => $requestContext,
+                    'request_payload' => array_merge($requestContext, ['request' => $requestPayload]),
                     'response_payload' => null,
                     'error_code' => (string) ($e->getCode() ?: 'submit_failed'),
                     'error_message' => $e->getMessage(),

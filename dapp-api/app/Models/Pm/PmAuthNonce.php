@@ -6,7 +6,7 @@ use Illuminate\Database\Eloquent\Model;
 use Dcat\Admin\Traits\HasDateTimeFormatter;
 
 /**
- *
+ * 
  *
  * @property int $id
  * @property string $address 钱包地址(小写)

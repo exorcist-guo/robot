@@ -7,6 +7,7 @@ use App\Console\Commands\PmApproveWalletCommand;
 use App\Console\Commands\PmDebugOrderIntentCommand;
 use App\Console\Commands\PmPollLeaderTradesCommand;
 use App\Console\Commands\PmMarketInfoDaemonCommand;
+use App\Console\Commands\PmSyncOrderSettlementCommand;
 use App\Console\Commands\PmTailSweepPriceDaemonCommand;
 use App\Console\Commands\PmValidateSetupCommand;
 use App\Console\Commands\TestCommand;
@@ -22,6 +23,7 @@ class Kernel extends ConsoleKernel
         PmDebugOrderIntentCommand::class,
         PmPollLeaderTradesCommand::class,
         PmMarketInfoDaemonCommand::class,
+        PmSyncOrderSettlementCommand::class,
         PmTailSweepPriceDaemonCommand::class,
         PmValidateSetupCommand::class,
     ];

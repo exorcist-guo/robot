@@ -2,7 +2,7 @@
 
 namespace App\Console\Commands;
 
-use App\Jobs\PmSyncOrderStatusJob;
+use App\Jobs\PmSyncOrderSettlementJob;
 use App\Models\Pm\PmOrder;
 use Illuminate\Console\Command;
 
@@ -21,7 +21,7 @@ class PmSyncOrdersCommand extends Command
             ->get();
 
         foreach ($orders as $order) {
-            PmSyncOrderStatusJob::dispatchSync($order->id);
+            PmSyncOrderSettlementJob::dispatchSync($order->id);
             $this->info("已同步订单 {$order->id} / {$order->poly_order_id}");
         }
 

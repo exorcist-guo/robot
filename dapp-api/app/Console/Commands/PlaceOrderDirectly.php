@@ -101,12 +101,12 @@ class PlaceOrderDirectly extends Command
             $baseSlug = $this->normalizeBaseSlug((string) $task->market_slug);
             if ($baseSlug !== '') {
                 $currentRoundSlug = $this->buildCurrentRoundSlug($baseSlug, $now);
+                var_dump($currentRoundSlug);
                 // $gammaClient->test($currentRoundSlug);exit;
-                $currentRoundKey = $this->buildRoundKeyFromSlug($currentRoundSlug);
                 $starTime = $this->starTime($now);
                 $endTime = $starTime + 300;
                 $market_end_at = date('Y-m-d H:i:s',$endTime);//每5分钟一个轮次
-                $needsRefresh = !$task->market_end_at || $task->tail_last_triggered_round_key !== $currentRoundKey;
+                $needsRefresh = !$task->market_end_at || (string) $task->market_end_at->timestamp !== (string) $endTime;
 
                 if ($needsRefresh) {
 
@@ -233,10 +233,25 @@ class PlaceOrderDirectly extends Command
                 continue;
             }
 
+            if (!$trading->isTokenTradable($tokenId)) {
+                var_dump([
+                    'task_id' => $task->id,
+                    'current_round_slug' => $currentRoundSlug ?? '',
+                    'market_id' => (string) $task->market_id,
+                    'market_question' => (string) $task->market_question,
+                    'trigger_side' => $triggerSide,
+                    'token_id' => $tokenId,
+                    'token_yes_id' => (string) $task->token_yes_id,
+                    'token_no_id' => (string) $task->token_no_id,
+                ]);
+                $this->warn("任务 {$task->id} token 不可交易: {$tokenId}");
+                continue;
+            }
+
             // 优先使用 market websocket 缓存里的 best_ask 作为买入参考价；取不到再回退到订单簿最优价。
             [$entryPrice, $entryPriceSource] = $this->resolveEntryPrice($marketInfoCache, $trading, $tokenId, $side, $books);
             if (!preg_match('/^\d+(\.\d+)?$/', $entryPrice) || bccomp($entryPrice, '0', 8) <= 0) {
-                var_dump(4444);
+                var_dump($entryPrice,$entryPriceSource,44444);
                 continue;
             }
 
@@ -293,6 +308,21 @@ class PlaceOrderDirectly extends Command
 
             // 交给统一下单执行任务异步处理。
             PmExecuteOrderIntentJob::dispatchSync($intent->id);
+            $intent->refresh();
+            $order = $intent->order()->latest('id')->first();
+            var_dump([
+                'task_id' => $task->id,
+                'intent_id' => $intent->id,
+                'intent_status' => (int) $intent->status,
+                'intent_skip_reason' => (string) ($intent->skip_reason ?? ''),
+                'intent_last_error_code' => (string) ($intent->last_error_code ?? ''),
+                'intent_last_error_message' => (string) ($intent->last_error_message ?? ''),
+                'order_id' => $order?->id,
+                'order_status' => $order ? (int) $order->status : null,
+                'order_error_code' => $order ? (string) ($order->error_code ?? '') : '',
+                'order_error_message' => $order ? (string) ($order->error_message ?? '') : '',
+                'poly_order_id' => $order ? (string) ($order->poly_order_id ?? '') : '',
+            ]);
             $this->info("任务 {$task->id} 已触发扫尾盘下单");
         }
     }
@@ -323,15 +353,6 @@ class PlaceOrderDirectly extends Command
         }
 
         return (string) (preg_replace('/-\d{10}$/', '', $slug) ?: $slug);
-    }
-
-    private function buildRoundKeyFromSlug(string $slug): ?string
-    {
-        if (!preg_match('/-(\d{10})$/', $slug, $matches)) {
-            return null;
-        }
-
-        return (string) $matches[1];
     }
 
     /**
@@ -385,7 +406,15 @@ class PlaceOrderDirectly extends Command
 
         $bookKey = $tokenId.'|'.$side;
         if (!isset($books[$bookKey])) {
-            $books[$bookKey] = $trading->getOrderBookBestPrice($tokenId, $side);
+            try {
+                $books[$bookKey] = $trading->getOrderBookBestPrice($tokenId, $side);
+            } catch (\Throwable $e) {
+                if (str_contains($e->getMessage(), 'No orderbook exists for the requested token id')) {
+                    $books[$bookKey] = ['price' => '0', 'book' => []];
+                } else {
+                    throw $e;
+                }
+            }
         }
 
         return [(string) ($books[$bookKey]['price'] ?? '0'), 'orderbook_best_price'];

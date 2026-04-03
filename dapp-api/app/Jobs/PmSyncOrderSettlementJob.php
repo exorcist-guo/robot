@@ -10,12 +10,15 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 
-class PmSyncOrderStatusJob implements ShouldQueue
+class PmSyncOrderSettlementJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public function __construct(private readonly int $orderId)
-    {
+    public function __construct(
+        private readonly int $orderId,
+        private readonly bool $queueClaim = false,
+        private readonly bool $dryRun = false,
+    ) {
     }
 
     public function handle(PmOrderSettlementSyncService $service): void
@@ -25,6 +28,6 @@ class PmSyncOrderStatusJob implements ShouldQueue
             return;
         }
 
-        $service->sync($order);
+        $service->sync($order, $this->queueClaim, $this->dryRun);
     }
 }

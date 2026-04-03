@@ -49,6 +49,8 @@ use Dcat\Admin\Traits\HasDateTimeFormatter;
  * @method static \Illuminate\Database\Eloquent\Builder|PmCustodyWallet whereStatus($value)
  * @method static \Illuminate\Database\Eloquent\Builder|PmCustodyWallet whereUpdatedAt($value)
  * @method static \Illuminate\Database\Eloquent\Builder|PmCustodyWallet whereWalletRole($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|PmCustodyWallet whereAddress($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|PmCustodyWallet whereEnPrivateKey($value)
  * @mixin \Eloquent
  */
 class PmCustodyWallet extends Model

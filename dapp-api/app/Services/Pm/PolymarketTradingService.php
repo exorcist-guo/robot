@@ -65,12 +65,16 @@ class PolymarketTradingService
 
     public function reserveExchangeNonce(PmCustodyWallet $wallet): string
     {
-        $current = (string) ($wallet->exchange_nonce ?: '0');
-        $next = bcadd($current, '1', 0);
+        $currentStored = (string) ($wallet->exchange_nonce ?: '0');
+        $timeBased = (string) ((int) floor(microtime(true) * 1000));
+        $next = bccomp($timeBased, $currentStored, 0) === 1
+            ? $timeBased
+            : bcadd($currentStored, '1', 0);
+
         $wallet->exchange_nonce = $next;
         $wallet->save();
 
-        return $current;
+        return $next;
     }
 
     public function syncExchangeNonceFromOrders(PmCustodyWallet $wallet): string
@@ -165,6 +169,43 @@ class PolymarketTradingService
             'book' => is_array($book) ? $book : [],
             'price' => $best,
         ];
+    }
+
+    /**
+     * 获取用户订单列表。
+     *
+     * @param array<string,mixed> $filters
+     * @return array<string,mixed>
+     */
+    public function getUserOrders(PmCustodyWallet $wallet, array $filters = [], int $limit = 100, int $offset = 0): array
+    {
+        $credRecord = $wallet->apiCredentials ?: $this->ensureApiCredentials($wallet);
+        $creds = $this->decodeApiCredentials($credRecord);
+        $privateKey = $this->privateKeyResolver->resolve($wallet);
+        $client = $this->factory->makeAuthedClobClient($privateKey, $creds);
+
+        return $this->withTransientClobRetry(
+            fn () => $client->clob()->orders()->list($filters, $limit, $offset),
+            '读取 Polymarket 用户订单失败'
+        );
+    }
+
+    /**
+     * 获取单个用户订单。
+     *
+     * @return array<string,mixed>
+     */
+    public function getUserOrder(PmCustodyWallet $wallet, string $polyOrderId): array
+    {
+        $credRecord = $wallet->apiCredentials ?: $this->ensureApiCredentials($wallet);
+        $creds = $this->decodeApiCredentials($credRecord);
+        $privateKey = $this->privateKeyResolver->resolve($wallet);
+        $client = $this->factory->makeAuthedClobClient($privateKey, $creds);
+
+        return $this->withTransientClobRetry(
+            fn () => $client->clob()->orders()->get($polyOrderId),
+            '读取 Polymarket 单个订单失败'
+        );
     }
 
     public function getBalanceAllowance(PmCustodyWallet $wallet): array
@@ -701,6 +742,10 @@ class PolymarketTradingService
         $message = strtolower($e->getMessage());
 
         return str_contains($message, 'curl error 35')
+            || str_contains($message, 'curl error 28')
+            || str_contains($message, 'failed to connect')
+            || str_contains($message, 'timed out')
+            || str_contains($message, 'timeout')
             || str_contains($message, 'unexpected eof while reading')
             || str_contains($message, 'ssl routines');
     }
