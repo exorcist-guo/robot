@@ -206,6 +206,17 @@ class PolymarketTradingService
     }
 
     /**
+     * @return array<string,mixed>
+     */
+    public function getOrderBook(string $tokenId): array
+    {
+        return $this->withTransientClobRetry(
+            fn () => $this->factory->makeReadClient()->clob()->book()->get($tokenId),
+            '读取 Polymarket orderbook 失败'
+        );
+    }
+
+    /**
      * @return array{book: array<string,mixed>, price: ?string, min_size: ?string}
      */
     public function getOrderBookBestPrice(string $tokenId, string $side): array
@@ -232,14 +243,17 @@ class PolymarketTradingService
      * 按订单簿深度估算可立即成交的市价参考价。
      * BUY 按 USDC 金额吃 asks；SELL 按 token 数量吃 bids。
      *
+     * @param array<string,mixed>|null $book 可选的已缓存 orderbook，避免重复请求
      * @return array<string,mixed>
      */
-    public function getOrderBookMarketPrice(string $tokenId, string $side, string $amount, ?string $size = null): array
+    public function getOrderBookMarketPrice(string $tokenId, string $side, string $amount, ?string $size = null, ?array $book = null): array
     {
-        $book = $this->withTransientClobRetry(
-            fn () => $this->factory->makeReadClient()->clob()->book()->get($tokenId),
-            '读取 Polymarket orderbook 失败'
-        );
+        if ($book === null) {
+            $book = $this->withTransientClobRetry(
+                fn () => $this->factory->makeReadClient()->clob()->book()->get($tokenId),
+                '读取 Polymarket orderbook 失败'
+            );
+        }
         $levels = match (strtoupper($side)) {
             self::SIDE_BUY => $book['asks'] ?? [],
             self::SIDE_SELL => $book['bids'] ?? [],
@@ -377,18 +391,28 @@ class PolymarketTradingService
         }
 
         if ($side === self::SIDE_BUY) {
-            $status = $this->getAllowanceStatus($wallet);
-            $balance = (string) ($status['balance'] ?? '0');
+            $credRecord = $wallet->apiCredentials ?: $this->ensureApiCredentials($wallet);
+            $creds = $this->decodeApiCredentials($credRecord);
+            $privateKey = $this->privateKeyResolver->resolve($wallet);
+            $client = $this->factory->makeAuthedClobClient($privateKey, $creds);
+
+            $params = [
+                'asset_type' => 'COLLATERAL',
+                'signature_type' => $wallet->signature_type,
+                'funder' => $wallet->tradingAddress(),
+            ];
+
+            $raw = $this->withTransientClobRetry(
+                fn () => $client->clob()->account()->getBalanceAllowance($params),
+                '读取 Polymarket balance 失败'
+            );
+
+            $balance = (string) ($raw['balance'] ?? '0');
             $checks = [
                 [
                     'code' => 'collateral_balance',
                     'passed' => $this->isPositiveDecimal($balance),
                     'value' => $balance,
-                ],
-                [
-                    'code' => 'collateral_allowance',
-                    'passed' => (bool) ($status['is_approved'] ?? false),
-                    'value' => $status['allowances'] ?? [],
                 ],
             ];
 
@@ -411,13 +435,9 @@ class PolymarketTradingService
                     return [
                         'side' => $side,
                         'is_ready' => false,
-                        'failure_code' => $check['code'] === 'collateral_required_notional'
-                            ? 'insufficient_collateral_balance'
-                            : ($check['code'] === 'collateral_allowance'
-                                ? 'insufficient_collateral_allowance'
-                                : 'insufficient_collateral_balance'),
+                        'failure_code' => 'insufficient_collateral_balance',
                         'checks' => $checks,
-                        'status' => $status,
+                        'balance' => $balance,
                     ];
                 }
             }
@@ -427,7 +447,7 @@ class PolymarketTradingService
                 'is_ready' => true,
                 'failure_code' => null,
                 'checks' => $checks,
-                'status' => $status,
+                'balance' => $balance,
             ];
         }
 
@@ -440,20 +460,30 @@ class PolymarketTradingService
             ];
         }
 
-        $status = $this->getConditionalAllowanceStatus($wallet, $tokenId);
-        $balanceUnits = (string) ($status['balance'] ?? '0');
+        $credRecord = $wallet->apiCredentials ?: $this->ensureApiCredentials($wallet);
+        $creds = $this->decodeApiCredentials($credRecord);
+        $privateKey = $this->privateKeyResolver->resolve($wallet);
+        $client = $this->factory->makeAuthedClobClient($privateKey, $creds);
+
+        $params = [
+            'asset_type' => 'CONDITIONAL',
+            'signature_type' => $wallet->signature_type,
+            'funder' => $wallet->tradingAddress(),
+            'token_id' => trim($tokenId),
+        ];
+
+        $raw = $this->withTransientClobRetry(
+            fn () => $client->clob()->account()->getBalanceAllowance($params),
+            '读取 Polymarket balance 失败'
+        );
+
+        $balanceUnits = (string) ($raw['balance'] ?? '0');
         $hasBalance = $this->isPositiveInteger($balanceUnits);
-        $hasApproval = (bool) ($status['is_approved'] ?? false);
         $checks = [
             [
                 'code' => 'position_balance',
                 'passed' => $hasBalance,
                 'value' => $balanceUnits,
-            ],
-            [
-                'code' => 'erc1155_approval',
-                'passed' => $hasApproval,
-                'value' => $status['allowances'] ?? [],
             ],
         ];
 
@@ -474,13 +504,9 @@ class PolymarketTradingService
                 return [
                     'side' => $side,
                     'is_ready' => false,
-                    'failure_code' => match ($check['code']) {
-                        'erc1155_approval' => 'missing_erc1155_approval',
-                        'position_required_size', 'position_balance' => 'insufficient_position_balance',
-                        default => 'sell_not_ready',
-                    },
+                    'failure_code' => 'insufficient_position_balance',
                     'checks' => $checks,
-                    'status' => $status,
+                    'balance' => $balanceUnits,
                 ];
             }
         }
@@ -490,7 +516,7 @@ class PolymarketTradingService
             'is_ready' => true,
             'failure_code' => null,
             'checks' => $checks,
-            'status' => $status,
+            'balance' => $balanceUnits,
         ];
     }
 

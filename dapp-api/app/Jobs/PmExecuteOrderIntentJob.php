@@ -88,7 +88,42 @@ class PmExecuteOrderIntentJob implements ShouldQueue
         $contextMarketId = (string) ($intent->leaderTrade?->market_id ?? ($riskSnapshot['market_id'] ?? ''));
         $contextOutcome = (string) ($intent->leaderTrade?->raw['outcome'] ?? ($riskSnapshot['trigger_side'] ?? ''));
 
-        if (!$trading->isTokenTradable((string) $intent->token_id)) {
+        $cachedBook = null;
+        try {
+            $cachedBook = $trading->getOrderBook((string) $intent->token_id);
+        } catch (\Throwable $e) {
+            $message = $e->getMessage();
+            if (str_contains($message, 'No orderbook exists for the requested token id')) {
+                PmOrder::updateOrCreate(
+                    ['order_intent_id' => $intent->id],
+                    [
+                        'status' => PmOrder::STATUS_ERROR,
+                        'request_payload' => [
+                            'intent_id' => $intent->id,
+                            'member_id' => $intent->member_id,
+                            'copy_task_id' => $intent->copy_task_id,
+                            'leader_trade_id' => $intent->leader_trade_id,
+                            'market_id' => $contextMarketId,
+                            'outcome' => $contextOutcome,
+                            'token_id' => (string) $intent->token_id,
+                        ],
+                        'response_payload' => null,
+                        'error_code' => 'token_not_tradable',
+                        'error_message' => 'token_not_tradable',
+                        'last_sync_at' => now(),
+                    ]
+                );
+
+                $intent->status = PmOrderIntent::STATUS_SKIPPED;
+                $intent->skip_reason = 'token_not_tradable';
+                $intent->save();
+                return;
+            }
+
+            throw $e;
+        }
+
+        if (!is_array($cachedBook) || $cachedBook === []) {
             PmOrder::updateOrCreate(
                 ['order_intent_id' => $intent->id],
                 [
@@ -144,7 +179,9 @@ class PmExecuteOrderIntentJob implements ShouldQueue
         $marketPriceQuote = $trading->getOrderBookMarketPrice(
             (string) $intent->token_id,
             $side,
-            $side === PolymarketTradingService::SIDE_BUY ? $usdc->__toString() : '0'
+            $side === PolymarketTradingService::SIDE_BUY ? $usdc->__toString() : '0',
+            null,
+            $cachedBook
         );
         $executionPrice = (string) ($marketPriceQuote['price'] ?? '0');
         if (bccomp($executionPrice, '0', 8) <= 0) {
