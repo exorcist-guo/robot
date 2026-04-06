@@ -115,6 +115,12 @@ class PolymarketClaimService
         $from = strtolower($credential->getAddress());
         $nonce = $this->rpcQuantityToInt($this->rpc($rpcUrl, 'eth_getTransactionCount', [$from, 'pending']));
         $gasPriceHex = (string) $this->rpc($rpcUrl, 'eth_gasPrice', []);
+
+        // 增加20%的Gas Price安全边际，避免交易卡在mempool
+        $baseGasPrice = $this->rpcQuantityToInt($gasPriceHex);
+        $safeGasPrice = (int) ($baseGasPrice * 1.2);
+        $gasPriceHex = '0x' . dechex($safeGasPrice);
+
         $chainId = (int) config('pm.chain_id', 137);
         $gasLimit = 220000;
 
@@ -150,8 +156,64 @@ class PolymarketClaimService
     }
 
     /**
-     * @param array<int,int> $indexSets
+     * 等待交易确认
+     *
+     * @param string $txHash 交易哈希
+     * @param int $timeoutSeconds 超时时间（秒）
+     * @return bool 是否确认成功
      */
+    public function waitForTransactionConfirmation(string $txHash, int $timeoutSeconds = 30): bool
+    {
+        $rpcUrl = trim((string) config('pm.polygon_rpc_url'));
+        if ($rpcUrl === '') {
+            return false;
+        }
+
+        $startTime = time();
+        $maxAttempts = $timeoutSeconds;
+
+        for ($i = 0; $i < $maxAttempts; $i++) {
+            if (time() - $startTime >= $timeoutSeconds) {
+                break;
+            }
+
+            try {
+                $receipt = $this->getTransactionReceipt($txHash);
+                if ($receipt !== null) {
+                    // status = 0x1 表示成功，0x0 表示失败
+                    return ($receipt['status'] ?? '0x0') === '0x1';
+                }
+            } catch (\Exception $e) {
+                // 忽略查询错误，继续重试
+            }
+
+            sleep(1);
+        }
+
+        return false;
+    }
+
+    /**
+     * 获取交易回执
+     *
+     * @param string $txHash 交易哈希
+     * @return array|null
+     */
+    public function getTransactionReceipt(string $txHash): ?array
+    {
+        $rpcUrl = trim((string) config('pm.polygon_rpc_url'));
+        if ($rpcUrl === '') {
+            return null;
+        }
+
+        try {
+            $result = $this->rpc($rpcUrl, 'eth_getTransactionReceipt', [$txHash]);
+            return is_array($result) ? $result : null;
+        } catch (\Exception $e) {
+            return null;
+        }
+    }
+
     private function encodeRedeemPositionsCalldata(string $collateralToken, string $parentCollectionId, string $conditionId, array $indexSets): string
     {
         $head = '';
