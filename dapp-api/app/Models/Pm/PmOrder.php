@@ -128,12 +128,14 @@ class PmOrder extends Model
     public const CLAIM_STATUS_PENDING = 1;
     /** 兑奖中：已发起或正在确认链上交易 */
     public const CLAIM_STATUS_CLAIMING = 2;
-    /** 已兑奖：链上交易已确认成功 */
+    /** 已兑奖：链上交易已提交 */
     public const CLAIM_STATUS_CLAIMED = 3;
     /** 兑奖失败：链上交易失败或兑奖流程异常 */
     public const CLAIM_STATUS_FAILED = 4;
     /** 已跳过：因规则或条件限制未执行兑奖 */
     public const CLAIM_STATUS_SKIPPED = 5;
+    /** 已确认到账：链上交易已确认并成功执行 */
+    public const CLAIM_STATUS_CONFIRMED = 6;
 
     protected $table = 'pm_orders';
 
