@@ -62,7 +62,7 @@ class TailSweepPriceCache
      */
     public function putSnapshot(array $snapshot): array
     {
-        var_dump($snapshot['symbol']);
+
         $normalized = [
             'symbol' => $this->normalizeSymbol((string) ($snapshot['symbol'] ?? '')),
             'value' => (string) ($snapshot['value'] ?? '0'),

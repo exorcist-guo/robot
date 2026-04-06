@@ -201,9 +201,7 @@ class PmScanTailSweepCommand extends Command
             // 默认标的是 btc/usd；同一 symbol 在本轮扫描内只读取一次共享缓存。
             $symbol = $priceCache->normalizeSymbol((string) ($task->market_symbol ?: 'btc/usd'));
             if (!array_key_exists($symbol, $snapshots)) {
-
                 $snapshot = $priceCache->getSnapshot($symbol);
-                var_dump($symbol,$snapshot);
                 if (!$priceCache->isFresh($snapshot)) {
                     $snapshots[$symbol] = null;
                     $this->warn("标的 {$symbol} 缓存行情缺失或已过期，跳过本轮扫描");
@@ -212,17 +210,71 @@ class PmScanTailSweepCommand extends Command
                 }
             }
 
+            $snapshot = $snapshots[$symbol];
+            if (!is_array($snapshot)) {
+                continue;
+            }
+
 
             // 只有进入最后 N 秒触发窗口后，才继续做价格变化判断。
+            $this->info("Task {$task->id}: remainingSeconds={$remainingSeconds}, time_limit={$task->tail_time_limit_seconds}");
             if ($remainingSeconds > (int) $task->tail_time_limit_seconds) {
-                var_dump("任务 {$task->id} 距离结束还有 {$remainingSeconds} 秒，未进入触发窗口{$task->tail_time_limit_seconds}");
+                //不要删除我的输出
+                // var_dump("限制时间是{$task->tail_time_limit_seconds}秒，当前剩余时间是{$remainingSeconds}秒，尚未进入触发窗口，跳过本轮扫描");
                 continue;
             }
 
 
 
-            $snapshot = $snapshots[$symbol];
-            if (!is_array($snapshot)) {
+            // currentPrice 是实时价格；tail_round_started_value 改为本轮开始价格。
+            $currentPrice = (string) ($snapshot['value'] ?? '0');
+            if (!preg_match('/^\d+(\.\d+)?$/', $currentPrice)) {
+                continue;
+            }
+
+            // 以 end_at 时间戳作为轮次 key，同一轮只允许触发一次。
+            $roundKey = (string) $marketEndAt->timestamp;
+
+            $startPrice = $this->getStartPrice($starTime, $endTime, $symbol);
+
+            // 变化量 = 当前价格 - 本轮开始价格。
+            $change = bcsub($currentPrice, $startPrice, 8);
+            $threshold = (string) ($task->tail_trigger_amount ?: '0');
+
+            $this->info("Task {$task->id}: currentPrice={$currentPrice}, startPrice={$startPrice}, change={$change}, threshold={$threshold}");
+
+            if (!preg_match('/^\d+(\.\d+)?$/', $threshold) || bccomp($threshold, '0', 8) <= 0) {
+                continue;
+            }
+
+            // 本轮已经触发过则直接跳过，避免重复下单。
+            if ($task->tail_last_triggered_round_key === $roundKey) {
+                continue;
+            }
+
+            $side = null;
+            $tokenId = null;
+            $triggerSide = null;
+            if (bccomp($change, $threshold, 8) >= 0) {
+                // 涨幅达到阈值：买上涨方向 token。
+                $side = PolymarketTradingService::SIDE_BUY;
+                $tokenId = (string) $task->token_yes_id;
+                $triggerSide = 'up';
+            } elseif (bccomp($change, bcmul($threshold, '-1', 8), 8) <= 0) {
+                // 跌幅达到阈值：买下跌方向 token。
+                $side = PolymarketTradingService::SIDE_BUY;
+                $tokenId = (string) $task->token_no_id;
+                $triggerSide = 'down';
+            }
+
+            if (!$side || !$triggerSide || $tokenId === '') {
+                //不要删除我的输出
+                // var_dump("任务 {$task->id} 跳过本轮扫描，无触发条件价格差是{$change}限制价差是{$threshold}");
+                continue;
+            }
+
+            // 只有进入最后 N 秒触发窗口后，才继续下单。
+            if ($remainingSeconds > (int) $task->tail_time_limit_seconds) {
                 continue;
             }
 
@@ -490,10 +542,10 @@ class PmScanTailSweepCommand extends Command
     private function reconnectRedis(): void
     {
         try {
-            // 强制重建 Cache Redis 连接
-            Cache::getStore()->flush();
+            // 测试 Cache Redis 连接是否正常（使用 ping 而不是 flush）
+            Cache::getStore()->getRedis()->ping();
         } catch (\Throwable) {
-            // 如果 flush 失败，说明连接已断开，强制重建连接池
+            // 如果 ping 失败，说明连接已断开，强制重建连接池
             try {
                 $app = app();
                 $app->forgetInstance('cache');
@@ -505,8 +557,8 @@ class PmScanTailSweepCommand extends Command
         }
 
         try {
-            // 强制重建 Redis Facade 连接
-            \Illuminate\Support\Facades\Redis::connection()->client();
+            // 测试 Redis Facade 连接是否正常
+            \Illuminate\Support\Facades\Redis::connection()->ping();
         } catch (\Throwable) {
             try {
                 \Illuminate\Support\Facades\Redis::purge();
