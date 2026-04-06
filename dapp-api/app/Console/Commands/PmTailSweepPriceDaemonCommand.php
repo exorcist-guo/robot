@@ -33,11 +33,11 @@ class PmTailSweepPriceDaemonCommand extends Command
         // 用缓存锁保证同一环境下只运行一个 daemon，避免重复建连和重复写缓存。
         $lock = Cache::store($priceCache->configuredStore() ?? null)->lock(
             $priceCache->daemonLockKey(),
-            max(10, (int) config('pm.tail_sweep_price_daemon_lock_seconds', 30))
+            max(10, (int) config('pm.tail_sweep_price_daemon_lock_seconds', 10))
         );
 
         try {
-            $lock->block(1);
+            // $lock->block(1);
         } catch (LockTimeoutException) {
             $this->warn('已有扫尾盘行情 daemon 正在运行，当前进程退出');
 
@@ -125,10 +125,11 @@ class PmTailSweepPriceDaemonCommand extends Command
 
                 // 持续读取 RTDS 推送的实时消息；非有效行情消息会返回 null 并继续循环。
                 $snapshot = $stream->readMessage($socket);
+
                 if (!is_array($snapshot)) {
                     continue;
                 }
-
+              
                 // 为快照补充本地接收时间，再写入共享缓存。
                 $snapshot['received_at'] = time();
                 $stored = $priceCache->putSnapshot($snapshot);

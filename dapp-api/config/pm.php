@@ -30,7 +30,7 @@ return [
     'tail_sweep_price_stale_after_seconds' => (int) env('PM_TAIL_SWEEP_PRICE_STALE_AFTER_SECONDS', 12),
     'tail_sweep_price_metadata_ttl_seconds' => (int) env('PM_TAIL_SWEEP_PRICE_METADATA_TTL_SECONDS', 300),
     'tail_sweep_price_daemon_heartbeat_ttl_seconds' => (int) env('PM_TAIL_SWEEP_PRICE_DAEMON_HEARTBEAT_TTL_SECONDS', 30),
-    'tail_sweep_price_daemon_lock_seconds' => (int) env('PM_TAIL_SWEEP_PRICE_DAEMON_LOCK_SECONDS', 600),
+    'tail_sweep_price_daemon_lock_seconds' => (int) env('PM_TAIL_SWEEP_PRICE_DAEMON_LOCK_SECONDS', 10),
     'tail_sweep_price_daemon_reconnect_sleep_seconds' => (int) env('PM_TAIL_SWEEP_PRICE_DAEMON_RECONNECT_SLEEP_SECONDS', 3),
     'tail_sweep_price_daemon_idle_sleep_seconds' => (int) env('PM_TAIL_SWEEP_PRICE_DAEMON_IDLE_SLEEP_SECONDS', 5),
     'tail_sweep_price_symbol_refresh_seconds' => (int) env('PM_TAIL_SWEEP_PRICE_SYMBOL_REFRESH_SECONDS', 10),

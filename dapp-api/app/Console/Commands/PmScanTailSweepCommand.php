@@ -62,6 +62,9 @@ class PmScanTailSweepCommand extends Command
         try {
             do {
                 try {
+                    // 每轮扫描前重连 Redis，避免连接超时
+                    $this->reconnectRedis();
+
                     $this->scan($gammaClient, $priceCache, $trading);
                     if ($once) {
                         $this->info('扫尾盘扫描完成');
@@ -72,6 +75,13 @@ class PmScanTailSweepCommand extends Command
                     $this->error('扫尾盘扫描异常: '.$e->getMessage());
                     if ($once) {
                         return self::FAILURE;
+                    }
+
+                    // 异常后也尝试重连，避免连接问题持续
+                    try {
+                        $this->reconnectRedis();
+                    } catch (\Throwable $reconnectError) {
+                        $this->warn('Redis 重连失败: '.$reconnectError->getMessage());
                     }
                 }
 
@@ -92,7 +102,7 @@ class PmScanTailSweepCommand extends Command
         $now = now();
 
         // 只加载启用中的扫尾盘任务，并裁剪为本轮计算真正需要的字段。
-        $tasks = PmCopyTask::query()
+        $tasks = $this->withRedisRetry(fn() => PmCopyTask::query()
             ->where('mode', PmCopyTask::MODE_TAIL_SWEEP)
             ->where('status', 1)
             ->get([
@@ -119,7 +129,7 @@ class PmScanTailSweepCommand extends Command
                 'max_slippage_bps',
                 'allow_partial_fill',
                 'daily_max_usdc',
-            ]);
+            ]));
 
         // 同一轮扫描内按 symbol / token+side 做缓存，避免重复请求外部数据。
         $snapshots = [];
@@ -188,16 +198,12 @@ class PmScanTailSweepCommand extends Command
                 continue;
             }
 
-            // 只有进入最后 N 秒触发窗口后，才继续做价格变化判断。
-            if ($remainingSeconds > (int) $task->tail_time_limit_seconds) {
-                var_dump("任务 {$task->id} 距离结束还有 {$remainingSeconds} 秒，未进入触发窗口");
-                continue;
-            }
-
             // 默认标的是 btc/usd；同一 symbol 在本轮扫描内只读取一次共享缓存。
             $symbol = $priceCache->normalizeSymbol((string) ($task->market_symbol ?: 'btc/usd'));
             if (!array_key_exists($symbol, $snapshots)) {
+
                 $snapshot = $priceCache->getSnapshot($symbol);
+                var_dump($symbol,$snapshot);
                 if (!$priceCache->isFresh($snapshot)) {
                     $snapshots[$symbol] = null;
                     $this->warn("标的 {$symbol} 缓存行情缺失或已过期，跳过本轮扫描");
@@ -205,6 +211,15 @@ class PmScanTailSweepCommand extends Command
                     $snapshots[$symbol] = $snapshot;
                 }
             }
+
+
+            // 只有进入最后 N 秒触发窗口后，才继续做价格变化判断。
+            if ($remainingSeconds > (int) $task->tail_time_limit_seconds) {
+                var_dump("任务 {$task->id} 距离结束还有 {$remainingSeconds} 秒，未进入触发窗口{$task->tail_time_limit_seconds}");
+                continue;
+            }
+
+
 
             $snapshot = $snapshots[$symbol];
             if (!is_array($snapshot)) {
@@ -251,6 +266,7 @@ class PmScanTailSweepCommand extends Command
             }
 
             if (!$side || !$triggerSide || $tokenId === '') {
+                var_dump("任务 {$task->id} 跳过本轮扫描，无触发条件价格差是{$change}限制价差是{$threshold}");
                 continue;
             }
 
@@ -466,5 +482,66 @@ class PmScanTailSweepCommand extends Command
         }
 
         return '0';
+    }
+
+    /**
+     * 重连 Redis，避免长时间运行后连接超时
+     */
+    private function reconnectRedis(): void
+    {
+        try {
+            // 强制重建 Cache Redis 连接
+            Cache::getStore()->flush();
+        } catch (\Throwable) {
+            // 如果 flush 失败，说明连接已断开，强制重建连接池
+            try {
+                $app = app();
+                $app->forgetInstance('cache');
+                $app->forgetInstance('cache.store');
+                Cache::purge();
+            } catch (\Throwable) {
+                // 忽略重建失败
+            }
+        }
+
+        try {
+            // 强制重建 Redis Facade 连接
+            \Illuminate\Support\Facades\Redis::connection()->client();
+        } catch (\Throwable) {
+            try {
+                \Illuminate\Support\Facades\Redis::purge();
+            } catch (\Throwable) {
+                // 忽略重建失败
+            }
+        }
+    }
+
+    /**
+     * 带 Redis 重试的操作包装器
+     */
+    private function withRedisRetry(callable $callback, int $maxRetries = 2)
+    {
+        $attempt = 0;
+        while ($attempt < $maxRetries) {
+            try {
+                return $callback();
+            } catch (\Throwable $e) {
+                $attempt++;
+                if ($attempt >= $maxRetries) {
+                    throw $e;
+                }
+
+                // 检查是否是 Redis 连接错误
+                if (str_contains($e->getMessage(), 'errno=10054') ||
+                    str_contains($e->getMessage(), 'Connection lost') ||
+                    str_contains($e->getMessage(), 'Redis::')) {
+                    $this->warn("Redis 连接错误，尝试重连 (第 {$attempt} 次)");
+                    $this->reconnectRedis();
+                    sleep(1);
+                } else {
+                    throw $e;
+                }
+            }
+        }
     }
 }

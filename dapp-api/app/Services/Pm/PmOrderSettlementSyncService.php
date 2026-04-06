@@ -143,7 +143,7 @@ class PmOrderSettlementSyncService
             in_array($remoteStatus, ['matched', 'filled'], true) => PmOrder::STATUS_FILLED,
             in_array($remoteStatus, ['partially_matched', 'partial', 'partially_filled'], true) => PmOrder::STATUS_PARTIAL,
             in_array($remoteStatus, ['canceled', 'cancelled', 'canceled_market_resolved', 'cancelled_market_resolved'], true) && $hasMatchedSize => PmOrder::STATUS_FILLED,
-            in_array($remoteStatus, ['canceled', 'cancelled'], true) => PmOrder::STATUS_CANCELED,
+            in_array($remoteStatus, ['canceled', 'cancelled', 'canceled_market_resolved', 'cancelled_market_resolved'], true) => PmOrder::STATUS_CANCELED,
             $remoteStatus === 'rejected' => PmOrder::STATUS_REJECTED,
             default => PmOrder::STATUS_SUBMITTED,
         };
@@ -177,6 +177,10 @@ class PmOrderSettlementSyncService
 
         if (in_array($localStatus, [PmOrder::STATUS_FILLED, PmOrder::STATUS_PARTIAL], true)) {
             [$isSettled, $winningOutcome, $settledAt, $settlementPayload, $settlementSource] = $this->resolveSettlement($order, $remote);
+        } elseif (in_array($localStatus, [PmOrder::STATUS_CANCELED, PmOrder::STATUS_REJECTED, PmOrder::STATUS_ERROR], true)) {
+            // 已取消、已拒绝、错误状态的订单也标记为已结算（最终状态）
+            $isSettled = true;
+            $settledAt = now();
         }
 
         $positionNotionalUsdc = null;

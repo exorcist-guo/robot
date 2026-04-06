@@ -46,6 +46,9 @@ class PmSyncOrderSettlementCommand extends Command
                             ->whereNull('claim_completed_at');
                     });
             });
+
+            // 只结算创建时间超过 10 分钟的订单
+            $query->where('created_at', '<=', now()->subMinutes(10));
         }
 
         $orders = $query->limit(200)->get();
