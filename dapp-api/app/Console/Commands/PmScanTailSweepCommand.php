@@ -190,6 +190,7 @@ class PmScanTailSweepCommand extends Command
 
             // 只有进入最后 N 秒触发窗口后，才继续做价格变化判断。
             if ($remainingSeconds > (int) $task->tail_time_limit_seconds) {
+                var_dump("任务 {$task->id} 距离结束还有 {$remainingSeconds} 秒，未进入触发窗口");
                 continue;
             }
 
