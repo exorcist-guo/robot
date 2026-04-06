@@ -48,11 +48,11 @@ class PmScanTailSweepCommand extends Command
 
         $lock = $lockProvider->lock(
             $this->daemonLockKey(),
-            max(10, (int) config('pm.tail_sweep_scan_lock_seconds', 600))
+            max(10, (int) config('pm.tail_sweep_scan_lock_seconds', 10))
         );
 
         try {
-            $lock->block(1);
+            // $lock->block(1);
         } catch (LockTimeoutException) {
             $this->warn('已有扫尾盘扫描 daemon 正在运行，当前进程退出');
 

@@ -58,7 +58,7 @@ return [
     // tail sweep 扫描 daemon
     'tail_sweep_scan_cache_store' => env('PM_TAIL_SWEEP_SCAN_CACHE_STORE', env('PM_TAIL_SWEEP_PRICE_CACHE_STORE', '')),
     'tail_sweep_scan_require_redis' => filter_var(env('PM_TAIL_SWEEP_SCAN_REQUIRE_REDIS', true), FILTER_VALIDATE_BOOL),
-    'tail_sweep_scan_lock_seconds' => (int) env('PM_TAIL_SWEEP_SCAN_LOCK_SECONDS', 600),
+    'tail_sweep_scan_lock_seconds' => (int) env('PM_TAIL_SWEEP_SCAN_LOCK_SECONDS', 10),
     'tail_sweep_scan_loop_sleep_seconds' => (int) env('PM_TAIL_SWEEP_SCAN_LOOP_SLEEP_SECONDS', 5),
     'tail_sweep_market_cache_ttl_seconds' => (int) env('PM_TAIL_SWEEP_MARKET_CACHE_TTL_SECONDS', 1800),
 
