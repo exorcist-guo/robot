@@ -580,8 +580,8 @@ class PolymarketDataClient
     // 读取并解码一帧 websocket 消息，只返回 payload 内容。
     private function readWebsocketFrame($socket): ?string
     {
-        $header = fread($socket, 2);
-        if ($header === false || strlen($header) < 2) {
+        $header = $this->readSocketBytes($socket, 2);
+        if ($header === null || strlen($header) < 2) {
             return null;
         }
 
@@ -591,19 +591,15 @@ class PolymarketDataClient
         $masked = ($second & 0x80) === 0x80;
         $length = $second & 0x7f;
 
-        if ($opcode === 0x8) {
-            return null;
-        }
-
         if ($length === 126) {
-            $extended = fread($socket, 2);
-            if ($extended === false || strlen($extended) < 2) {
+            $extended = $this->readSocketBytes($socket, 2);
+            if ($extended === null || strlen($extended) < 2) {
                 return null;
             }
             $length = unpack('n', $extended)[1];
         } elseif ($length === 127) {
-            $extended = fread($socket, 8);
-            if ($extended === false || strlen($extended) < 8) {
+            $extended = $this->readSocketBytes($socket, 8);
+            if ($extended === null || strlen($extended) < 8) {
                 return null;
             }
             $parts = unpack('N2', $extended);
@@ -612,19 +608,15 @@ class PolymarketDataClient
 
         $mask = '';
         if ($masked) {
-            $mask = fread($socket, 4);
-            if ($mask === false || strlen($mask) < 4) {
+            $mask = $this->readSocketBytes($socket, 4);
+            if ($mask === null || strlen($mask) < 4) {
                 return null;
             }
         }
 
-        $payload = '';
-        while (strlen($payload) < $length) {
-            $chunk = fread($socket, $length - strlen($payload));
-            if ($chunk === false || $chunk === '') {
-                break;
-            }
-            $payload .= $chunk;
+        $payload = $length > 0 ? $this->readSocketBytes($socket, $length) : '';
+        if ($payload === null || strlen($payload) < $length) {
+            return null;
         }
 
         if ($masked) {
@@ -635,6 +627,53 @@ class PolymarketDataClient
             $payload = $decoded;
         }
 
+        if ($opcode === 0x8) {
+            return null;
+        }
+
+        if ($opcode === 0x9) {
+            $this->writeControlFrame($socket, 0xA, $payload);
+
+            return $this->readWebsocketFrame($socket);
+        }
+
+        if ($opcode === 0xA) {
+            return $this->readWebsocketFrame($socket);
+        }
+
         return $payload;
+    }
+
+    private function readSocketBytes($socket, int $length): ?string
+    {
+        $buffer = '';
+        while (strlen($buffer) < $length) {
+            $chunk = @fread($socket, $length - strlen($buffer));
+            if ($chunk === false || $chunk === '') {
+                break;
+            }
+            $buffer .= $chunk;
+        }
+
+        return $buffer !== '' || $length === 0 ? $buffer : null;
+    }
+
+    private function writeControlFrame($socket, int $opcode, string $payload = ''): void
+    {
+        $length = strlen($payload);
+        if ($length > 125) {
+            throw new \RuntimeException('控制帧 payload 过长');
+        }
+
+        $frame = chr(0x80 | ($opcode & 0x0f));
+        $mask = random_bytes(4);
+        $frame .= chr(0x80 | $length) . $mask;
+
+        $masked = '';
+        for ($i = 0; $i < $length; $i++) {
+            $masked .= $payload[$i] ^ $mask[$i % 4];
+        }
+
+        fwrite($socket, $frame . $masked);
     }
 }

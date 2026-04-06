@@ -467,12 +467,22 @@ class PmExecuteOrderIntentJob implements ShouldQueue
     private function mapRemoteStatus(array $response): int
     {
         $status = strtolower((string) ($response['status'] ?? ''));
+        $matchedSize = null;
+        foreach (['size_matched', 'filled_size', 'matched_size', 'sizeMatched'] as $key) {
+            $value = $response[$key] ?? null;
+            if (is_string($value) || is_int($value) || is_float($value)) {
+                $matchedSize = (string) $value;
+                break;
+            }
+        }
+        $hasMatchedSize = $matchedSize !== null && preg_match('/^\d+(\.\d+)?$/', $matchedSize) && bccomp($matchedSize, '0', 8) > 0;
 
-        return match ($status) {
-            'matched', 'filled' => PmOrder::STATUS_FILLED,
-            'partially_matched', 'partial', 'partially_filled' => PmOrder::STATUS_PARTIAL,
-            'canceled', 'cancelled' => PmOrder::STATUS_CANCELED,
-            'rejected' => PmOrder::STATUS_REJECTED,
+        return match (true) {
+            in_array($status, ['matched', 'filled'], true) => PmOrder::STATUS_FILLED,
+            in_array($status, ['partially_matched', 'partial', 'partially_filled'], true) => PmOrder::STATUS_PARTIAL,
+            in_array($status, ['canceled', 'cancelled', 'canceled_market_resolved', 'cancelled_market_resolved'], true) && $hasMatchedSize => PmOrder::STATUS_FILLED,
+            in_array($status, ['canceled', 'cancelled'], true) => PmOrder::STATUS_CANCELED,
+            $status === 'rejected' => PmOrder::STATUS_REJECTED,
             default => PmOrder::STATUS_SUBMITTED,
         };
     }

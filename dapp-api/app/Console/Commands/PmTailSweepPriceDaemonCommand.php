@@ -149,7 +149,17 @@ class PmTailSweepPriceDaemonCommand extends Command
                 'updated_at' => time(),
                 'last_error' => $e->getMessage(),
             ]);
-            $this->error('扫尾盘行情 daemon 异常: '.$e->getMessage());
+
+            $message = $e->getMessage();
+            $isRecoverable = str_contains($message, '读取超时')
+                || str_contains($message, '连接已关闭')
+                || str_contains($message, '强迫关闭了一个现有的连接');
+
+            if ($isRecoverable) {
+                $this->warn('扫尾盘行情 daemon 连接中断，准备重连: '.$message);
+            } else {
+                $this->error('扫尾盘行情 daemon 异常: '.$message);
+            }
 
             return self::FAILURE;
         } finally {

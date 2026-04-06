@@ -43,7 +43,9 @@ class PmOrderSettlementSyncService
 
         $order->status = $snapshot['local_status'];
         $order->response_payload = $remote;
-        $order->filled_usdc = max((int) $order->filled_usdc, (int) $snapshot['filled_usdc']);
+        $syncedFilledUsdc = (int) $snapshot['filled_usdc'];
+        $currentFilledUsdc = (int) $order->filled_usdc;
+        $order->filled_usdc = $currentFilledUsdc <= 0 ? $syncedFilledUsdc : max($currentFilledUsdc, $syncedFilledUsdc);
         $order->avg_price = $order->avg_price ?: ($snapshot['order_price'] ?: ($order->request_payload['normalized_price'] ?? null));
         $order->original_size = $snapshot['original_size'];
         $order->filled_size = $snapshot['filled_size'];
@@ -129,15 +131,23 @@ class PmOrderSettlementSyncService
     public function buildSettlementSnapshot(PmOrder $order, array $remote): array
     {
         $remoteStatus = strtolower((string) ($remote['status'] ?? ''));
-        $localStatus = match ($remoteStatus) {
-            'matched', 'filled' => PmOrder::STATUS_FILLED,
-            'partially_matched', 'partial', 'partially_filled' => PmOrder::STATUS_PARTIAL,
-            'canceled', 'cancelled' => PmOrder::STATUS_CANCELED,
-            'rejected' => PmOrder::STATUS_REJECTED,
+        $filledUsdc = $this->extractFilledUsdc($remote);
+        $filledSize = $this->pickDecimal([
+            $remote['size_matched'] ?? null,
+            $remote['filled_size'] ?? null,
+            $remote['matched_size'] ?? null,
+            $remote['sizeMatched'] ?? null,
+        ]);
+        $hasMatchedSize = $filledSize !== null && bccomp($filledSize, '0', 8) > 0;
+        $localStatus = match (true) {
+            in_array($remoteStatus, ['matched', 'filled'], true) => PmOrder::STATUS_FILLED,
+            in_array($remoteStatus, ['partially_matched', 'partial', 'partially_filled'], true) => PmOrder::STATUS_PARTIAL,
+            in_array($remoteStatus, ['canceled', 'cancelled', 'canceled_market_resolved', 'cancelled_market_resolved'], true) && $hasMatchedSize => PmOrder::STATUS_FILLED,
+            in_array($remoteStatus, ['canceled', 'cancelled'], true) => PmOrder::STATUS_CANCELED,
+            $remoteStatus === 'rejected' => PmOrder::STATUS_REJECTED,
             default => PmOrder::STATUS_SUBMITTED,
         };
 
-        $filledUsdc = $this->extractFilledUsdc($remote);
         $filledSize = $this->pickDecimal([
             $remote['size_matched'] ?? null,
             $remote['filled_size'] ?? null,
@@ -381,15 +391,45 @@ class PmOrderSettlementSyncService
      */
     private function extractFilledUsdc(array $remote): int
     {
-        $candidate = (string) ($remote['takingAmount'] ?? $remote['filledAmount'] ?? '0');
-        if (!preg_match('/^\d+(\.\d+)?$/', $candidate)) {
-            $candidate = '0';
+        $candidates = [
+            $remote['takingAmount'] ?? null,
+            $remote['taking_amount'] ?? null,
+            $remote['filledAmount'] ?? null,
+            $remote['filled_amount'] ?? null,
+            $remote['usdcAmount'] ?? null,
+            $remote['usdc_amount'] ?? null,
+            $remote['matchedAmount'] ?? null,
+            $remote['matched_amount'] ?? null,
+        ];
+
+        foreach ($candidates as $candidate) {
+            $value = trim((string) $candidate);
+            if (preg_match('/^\d+(\.\d+)?$/', $value)) {
+                return (int) BigDecimal::of($value)
+                    ->multipliedBy('1000000')
+                    ->toScale(0, RoundingMode::DOWN)
+                    ->__toString();
+            }
         }
 
-        return (int) BigDecimal::of($candidate)
-            ->multipliedBy('1000000')
-            ->toScale(0, RoundingMode::DOWN)
-            ->__toString();
+        $filledSize = $this->pickDecimal([
+            $remote['size_matched'] ?? null,
+            $remote['filled_size'] ?? null,
+            $remote['matched_size'] ?? null,
+            $remote['sizeMatched'] ?? null,
+        ]);
+        $orderPrice = $this->pickDecimal([
+            $remote['price'] ?? null,
+            $remote['avg_price'] ?? null,
+            $remote['initialPrice'] ?? null,
+            $remote['initial_price'] ?? null,
+        ]);
+
+        if ($filledSize !== null && $orderPrice !== null) {
+            return (int) $this->decimalToUsdc($this->multiplyDecimal($filledSize, $orderPrice));
+        }
+
+        return 0;
     }
 
     /**
