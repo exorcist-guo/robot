@@ -52,6 +52,7 @@ class MeController extends Controller
             PmOrder::CLAIM_STATUS_CLAIMED => '已兑奖',
             PmOrder::CLAIM_STATUS_FAILED => '兑奖失败',
             PmOrder::CLAIM_STATUS_SKIPPED => '已跳过',
+            PmOrder::CLAIM_STATUS_CONFIRMED => '已确认到账',
             default => '未知状态',
         };
     }
