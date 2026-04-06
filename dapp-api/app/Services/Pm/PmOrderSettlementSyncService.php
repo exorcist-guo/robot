@@ -690,7 +690,9 @@ class PmOrderSettlementSyncService
         $riskMarketId = is_array($order->intent?->risk_snapshot) ? ($order->intent->risk_snapshot['market_id'] ?? null) : null;
         $requestMarketId = is_array($order->request_payload) ? ($order->request_payload['market_id'] ?? ($order->request_payload['request']['input']['market_id'] ?? null)) : null;
 
-        foreach ([$taskMarketId, $riskMarketId, $requestMarketId] as $candidate) {
+        // 优先使用下单时的快照数据（riskMarketId, requestMarketId），最后才使用 taskMarketId
+        // 因为 taskMarketId 会动态更新为任务当前监听的最新市场，而不是下单时的市场
+        foreach ([$riskMarketId, $requestMarketId, $taskMarketId] as $candidate) {
             if (is_string($candidate) && preg_match('/^\d+$/', $candidate) === 1) {
                 $gammaCandidates[] = $candidate;
             }

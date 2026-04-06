@@ -215,61 +215,81 @@ class PmScanTailSweepCommand extends Command
                 continue;
             }
 
+            //价格时间限制配置：[价格变化阈值 => 时间限制(秒)]
+            $limit_time_price = [
+                'btc/usd' => [200 => 180, 100 => 120, 30 => 60, 20 => 30],
+                'eth/usd' => [200 => 180, 100 => 120, 30 => 60, 20 => 30],
+            ];
 
-            // 只有进入最后 N 秒触发窗口后，才继续做价格变化判断。
-            $this->info("Task {$task->id}: remainingSeconds={$remainingSeconds}, time_limit={$task->tail_time_limit_seconds}");
-            if ($remainingSeconds > (int) $task->tail_time_limit_seconds) {
-                //不要删除我的输出
-                // var_dump("限制时间是{$task->tail_time_limit_seconds}秒，当前剩余时间是{$remainingSeconds}秒，尚未进入触发窗口，跳过本轮扫描");
+            // 获取当前标的的配置，如果没有配置则跳过
+            $symbolConfig = $limit_time_price[$symbol] ?? null;
+            if (!$symbolConfig) {
+                $this->warn("标的 {$symbol} 没有配置价格-时间阈值，跳过");
                 continue;
             }
 
-
-
-            // currentPrice 是实时价格；tail_round_started_value 改为本轮开始价格。
+            // currentPrice 是实时价格
             $currentPrice = (string) ($snapshot['value'] ?? '0');
             if (!preg_match('/^\d+(\.\d+)?$/', $currentPrice)) {
                 continue;
             }
 
-            // 以 end_at 时间戳作为轮次 key，同一轮只允许触发一次。
+            // 以 end_at 时间戳作为轮次 key，同一轮只允许触发一次
             $roundKey = (string) $marketEndAt->timestamp;
 
-            $startPrice = $this->getStartPrice($starTime, $endTime, $symbol);
-
-            // 变化量 = 当前价格 - 本轮开始价格。
-            $change = bcsub($currentPrice, $startPrice, 8);
-            $threshold = (string) ($task->tail_trigger_amount ?: '0');
-
-            $this->info("Task {$task->id}: currentPrice={$currentPrice}, startPrice={$startPrice}, change={$change}, threshold={$threshold}");
-
-            if (!preg_match('/^\d+(\.\d+)?$/', $threshold) || bccomp($threshold, '0', 8) <= 0) {
-                continue;
-            }
-
-            // 本轮已经触发过则直接跳过，避免重复下单。
+            // 本轮已经触发过则直接跳过，避免重复下单
             if ($task->tail_last_triggered_round_key === $roundKey) {
                 continue;
             }
 
+            $startPrice = $this->getStartPrice($starTime, $endTime, $symbol);
+
+            // 变化量 = 当前价格 - 本轮开始价格
+            $change = bcsub($currentPrice, $startPrice, 8);
+            $absChange = bcmul($change, $change[0] === '-' ? '-1' : '1', 8); // 取绝对值
+
+            $this->info("Task {$task->id}: remainingSeconds={$remainingSeconds}, currentPrice={$currentPrice}, startPrice={$startPrice}, change={$change}, absChange={$absChange}");
+
+            // 遍历价格-时间阈值配置，从大到小检查（已按key降序排列）
+            $triggered = false;
+            $matchedThreshold = null;
+            $matchedTimeLimit = null;
+
+            foreach ($symbolConfig as $priceThreshold => $timeLimit) {
+                // 价格变化绝对值 >= 阈值 且 剩余时间 <= 时间限制
+                if (bccomp($absChange, (string)$priceThreshold, 8) >= 0 && $remainingSeconds <= $timeLimit) {
+                    $triggered = true;
+                    $matchedThreshold = $priceThreshold;
+                    $matchedTimeLimit = $timeLimit;
+                    break;
+                }
+            }
+
+            if (!$triggered) {
+                $this->info("Task {$task->id}: 未满足任何触发条件，跳过");
+                continue;
+            }
+
+            $this->info("Task {$task->id}: 触发条件满足 - 价格变化={$absChange} >= {$matchedThreshold}, 剩余时间={$remainingSeconds}s <= {$matchedTimeLimit}s");
+
+            // 根据价格变化方向决定买入方向
             $side = null;
             $tokenId = null;
             $triggerSide = null;
-            if (bccomp($change, $threshold, 8) >= 0) {
-                // 涨幅达到阈值：买上涨方向 token。
+            if (bccomp($change, '0', 8) > 0) {
+                // 价格上涨：买上涨方向 token
                 $side = PolymarketTradingService::SIDE_BUY;
                 $tokenId = (string) $task->token_yes_id;
                 $triggerSide = 'up';
-            } elseif (bccomp($change, bcmul($threshold, '-1', 8), 8) <= 0) {
-                // 跌幅达到阈值：买下跌方向 token。
+            } elseif (bccomp($change, '0', 8) < 0) {
+                // 价格下跌：买下跌方向 token
                 $side = PolymarketTradingService::SIDE_BUY;
                 $tokenId = (string) $task->token_no_id;
                 $triggerSide = 'down';
             }
 
             if (!$side || !$triggerSide || $tokenId === '') {
-                //不要删除我的输出
-                // var_dump("任务 {$task->id} 跳过本轮扫描，无触发条件价格差是{$change}限制价差是{$threshold}");
+                $this->warn("Task {$task->id}: 无法确定交易方向，跳过");
                 continue;
             }
 
