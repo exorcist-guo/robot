@@ -525,7 +525,8 @@ class PmOrderSettlementSyncService
             }
 
             try {
-                return Carbon::parse($candidate);
+                // 强制使用 UTC 时区解析，避免时区转换错误
+                return Carbon::parse($candidate, 'UTC');
             } catch (Throwable) {
             }
         }
