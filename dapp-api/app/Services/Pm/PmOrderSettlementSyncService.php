@@ -269,9 +269,13 @@ class PmOrderSettlementSyncService
 
         $winningOutcome = null;
         foreach ($tokens as $token) {
-            if (is_array($token) && ($token['winner'] ?? false) === true) {
-                $winningOutcome = $this->normalizeOutcome((string) ($token['outcome'] ?? ''));
-                break;
+            if (is_array($token)) {
+                $winner = $token['winner'] ?? false;
+                // winner 可能是 true, 1, "1", "true" 等
+                if ($winner === true || $winner === 1 || $winner === '1' || $winner === 'true') {
+                    $winningOutcome = $this->normalizeOutcome((string) ($token['outcome'] ?? ''));
+                    break;
+                }
             }
         }
 
@@ -549,9 +553,13 @@ class PmOrderSettlementSyncService
 
         $winningOutcome = null;
         foreach ($tokens as $token) {
-            if (is_array($token) && ($token['winner'] ?? false) === true) {
-                $winningOutcome = $this->normalizeOutcome((string) ($token['outcome'] ?? ''));
-                break;
+            if (is_array($token)) {
+                $winner = $token['winner'] ?? false;
+                // winner 可能是 true, 1, "1", "true" 等
+                if ($winner === true || $winner === 1 || $winner === '1' || $winner === 'true') {
+                    $winningOutcome = $this->normalizeOutcome((string) ($token['outcome'] ?? ''));
+                    break;
+                }
             }
         }
 
