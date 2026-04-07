@@ -282,6 +282,18 @@ class PmOrderSettlementSyncService
         $marketEndAt = $this->orderMarketEndAt($order, $market);
         $isSettled = $winningOutcome !== null && ($marketEndAt === null || now()->gte($marketEndAt));
 
+        // 调试日志（无条件输出）
+        \Log::info('PmOrderSettlementSync::resolveSettlement', [
+            'order_id' => $order->id,
+            'winning_outcome' => $winningOutcome,
+            'market_end_at' => $marketEndAt?->toDateTimeString(),
+            'now' => now()->toDateTimeString(),
+            'is_after_end' => $marketEndAt === null ? 'null' : now()->gte($marketEndAt),
+            'is_settled' => $isSettled,
+            'tokens_count' => count($tokens),
+            'tokens' => $tokens,
+        ]);
+
         return [
             $isSettled,
             $winningOutcome,

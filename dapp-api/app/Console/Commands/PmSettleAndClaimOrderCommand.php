@@ -97,6 +97,7 @@ class PmSettleAndClaimOrderCommand extends Command
                     $this->line('    - is_settled: ' . ($snapshot['is_settled'] ? 'true' : 'false'));
                     $this->line('    - winning_outcome: ' . ($snapshot['winning_outcome'] ?? 'null'));
                     $this->line('    - settlement_source: ' . ($snapshot['settlement_source'] ?? 'null'));
+                    $this->line('    - settled_at: ' . ($snapshot['settled_at'] ? $snapshot['settled_at']->toDateTimeString() : 'null'));
                     $this->line('    - is_win: ' . ($snapshot['is_win'] === null ? 'null' : ($snapshot['is_win'] ? 'true' : 'false')));
                     $this->line('    - pnl_usdc: ' . ($snapshot['pnl_usdc'] ?? 'null'));
                     $this->line('    - profit_usdc: ' . ($snapshot['profit_usdc'] ?? 'null'));
@@ -111,13 +112,17 @@ class PmSettleAndClaimOrderCommand extends Command
                         if (isset($payload['market'])) {
                             $market = $payload['market'];
                             $this->line('    - market.closed: ' . ($market['closed'] ?? 'null'));
+                            $this->line('    - market.closedTime: ' . ($market['closedTime'] ?? 'null'));
+                            $this->line('    - market.endDate: ' . ($market['endDate'] ?? 'null'));
                             $this->line('    - market.umaResolutionStatus: ' . ($market['umaResolutionStatus'] ?? 'null'));
                         }
 
                         if (isset($payload['market_tokens'])) {
                             $this->line('    - market_tokens:');
                             foreach ($payload['market_tokens'] as $token) {
-                                $this->line('      * ' . ($token['outcome'] ?? '?') . ': winner=' . ($token['winner'] ?? 'null') . ', price=' . ($token['price'] ?? 'null'));
+                                $winnerVal = $token['winner'] ?? 'null';
+                                $winnerType = is_bool($winnerVal) ? 'bool' : (is_int($winnerVal) ? 'int' : (is_string($winnerVal) ? 'string' : gettype($winnerVal)));
+                                $this->line('      * ' . ($token['outcome'] ?? '?') . ': winner=' . json_encode($winnerVal) . ' (type:' . $winnerType . '), price=' . ($token['price'] ?? 'null'));
                             }
                         }
                     }
