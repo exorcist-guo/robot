@@ -227,11 +227,13 @@ class PmSettleAndClaimOrderCommand extends Command
     private function getStatusText(int $status): string
     {
         return match ($status) {
-            PmOrder::STATUS_PENDING => '待处理',
+            PmOrder::STATUS_NEW => '新建',
+            PmOrder::STATUS_SUBMITTED => '已提交',
             PmOrder::STATUS_FILLED => '已成交',
             PmOrder::STATUS_PARTIAL => '部分成交',
-            PmOrder::STATUS_CANCELLED => '已取消',
-            PmOrder::STATUS_FAILED => '失败',
+            PmOrder::STATUS_CANCELED => '已取消',
+            PmOrder::STATUS_REJECTED => '已拒绝',
+            PmOrder::STATUS_ERROR => '错误',
             default => "未知({$status})",
         };
     }
