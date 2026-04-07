@@ -507,16 +507,7 @@ class PmOrderSettlementSyncService
 
     private function orderMarketEndAt(PmOrder $order, array $market = []): ?Carbon
     {
-        $taskMarketEndAt = $order->intent?->copyTask?->market_end_at;
-        if ($taskMarketEndAt instanceof Carbon) {
-            \Log::info('orderMarketEndAt: 使用任务时间', [
-                'order_id' => $order->id,
-                'time' => $taskMarketEndAt->toDateTimeString(),
-                'timezone' => $taskMarketEndAt->timezone->getName(),
-            ]);
-            return $taskMarketEndAt;
-        }
-
+        // 优先使用 settlement_payload 中的市场时间（更准确）
         $candidates = [
             'endDate' => $market['endDate'] ?? null,
             'end_date' => $market['end_date'] ?? null,
@@ -549,6 +540,17 @@ class PmOrderSettlementSyncService
                     'error' => $e->getMessage(),
                 ]);
             }
+        }
+
+        // 兜底：使用任务时间（可能不准确）
+        $taskMarketEndAt = $order->intent?->copyTask?->market_end_at;
+        if ($taskMarketEndAt instanceof Carbon) {
+            \Log::warning('orderMarketEndAt: 使用任务时间（兜底）', [
+                'order_id' => $order->id,
+                'time' => $taskMarketEndAt->toDateTimeString(),
+                'timezone' => $taskMarketEndAt->timezone->getName(),
+            ]);
+            return $taskMarketEndAt;
         }
 
         \Log::warning('orderMarketEndAt: 未找到有效时间', [
