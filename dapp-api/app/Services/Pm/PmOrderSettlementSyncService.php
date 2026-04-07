@@ -677,6 +677,14 @@ class PmOrderSettlementSyncService
      */
     private function fetchResolvedMarket(string $conditionId, PmOrder $order): array
     {
+        // 优先使用已有的 settlement_payload 中的市场数据（避免重复API调用）
+        if (is_array($order->settlement_payload) && isset($order->settlement_payload['market'])) {
+            $cachedMarket = $order->settlement_payload['market'];
+            if (is_array($cachedMarket) && $cachedMarket !== [] && $this->marketMatchesCondition($cachedMarket, $conditionId)) {
+                return $cachedMarket;
+            }
+        }
+
         try {
             $market = $this->factory->makeReadClient()->clob()->markets()->get($conditionId);
             if (is_array($market) && $market !== [] && $this->marketMatchesCondition($market, $conditionId)) {
