@@ -83,7 +83,7 @@ class PmSettleAndClaimOrderCommand extends Command
             // 步骤1: 结算
             $this->info('📊 步骤1: 同步结算状态');
             try {
-                $result = $syncService->syncOne($order->id, false);
+                $result = $syncService->sync($order, false, false);
 
                 $order->refresh();
 
