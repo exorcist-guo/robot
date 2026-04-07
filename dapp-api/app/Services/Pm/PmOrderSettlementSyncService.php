@@ -509,28 +509,52 @@ class PmOrderSettlementSyncService
     {
         $taskMarketEndAt = $order->intent?->copyTask?->market_end_at;
         if ($taskMarketEndAt instanceof Carbon) {
+            \Log::info('orderMarketEndAt: 使用任务时间', [
+                'order_id' => $order->id,
+                'time' => $taskMarketEndAt->toDateTimeString(),
+                'timezone' => $taskMarketEndAt->timezone->getName(),
+            ]);
             return $taskMarketEndAt;
         }
 
         $candidates = [
-            $market['endDate'] ?? null,
-            $market['end_date'] ?? null,
-            $market['closedTime'] ?? null,
-            $market['closed_time'] ?? null,
+            'endDate' => $market['endDate'] ?? null,
+            'end_date' => $market['end_date'] ?? null,
+            'closedTime' => $market['closedTime'] ?? null,
+            'closed_time' => $market['closed_time'] ?? null,
         ];
 
-        foreach ($candidates as $candidate) {
+        foreach ($candidates as $key => $candidate) {
             if (!is_string($candidate) || trim($candidate) === '') {
                 continue;
             }
 
             try {
                 // 强制使用 UTC 时区解析，避免时区转换错误
-                return Carbon::parse($candidate, 'UTC');
-            } catch (Throwable) {
+                $parsed = Carbon::parse($candidate, 'UTC');
+                \Log::info('orderMarketEndAt: 解析成功', [
+                    'order_id' => $order->id,
+                    'field' => $key,
+                    'raw' => $candidate,
+                    'parsed' => $parsed->toDateTimeString(),
+                    'timezone' => $parsed->timezone->getName(),
+                    'timestamp' => $parsed->timestamp,
+                ]);
+                return $parsed;
+            } catch (Throwable $e) {
+                \Log::warning('orderMarketEndAt: 解析失败', [
+                    'order_id' => $order->id,
+                    'field' => $key,
+                    'raw' => $candidate,
+                    'error' => $e->getMessage(),
+                ]);
             }
         }
 
+        \Log::warning('orderMarketEndAt: 未找到有效时间', [
+            'order_id' => $order->id,
+            'candidates' => $candidates,
+        ]);
         return null;
     }
 
