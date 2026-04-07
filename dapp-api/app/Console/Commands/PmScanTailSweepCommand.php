@@ -217,7 +217,7 @@ class PmScanTailSweepCommand extends Command
 
             //价格时间限制配置：[价格变化阈值 => 时间限制(秒)]
             $limit_time_price = [
-                'btc/usd' => [200 => 180, 100 => 120, 30 => 60, 20 => 30],
+                'btc/usd' => [200 => 180, 100 => 120, 30 => 60,20 =>30],
                 'eth/usd' => [200 => 180, 100 => 120, 30 => 60, 20 => 30],
             ];
 
@@ -397,6 +397,7 @@ class PmScanTailSweepCommand extends Command
                     'entry_price' => $entryPrice,
                     'entry_price_source' => $entryPriceSource,
                 ],
+                'price_time_limit' => "{$matchedThreshold}-{$matchedTimeLimit}",
             ]);
 
             // 标记当前轮次已触发，防止本轮再次生成意图。
