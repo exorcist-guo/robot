@@ -27,6 +27,33 @@ class TestCommand extends Command
      */
     public function handle(PolymarketTradingService $trading)
     {
+        $order = \App\Models\Pm\PmOrder::find(360);
+        if (!$order) {
+            $this->error('订单不存在');
+            return self::FAILURE;
+        }
+
+        $service = app(\App\Services\Pm\PmOrderSettlementSyncService::class);
+
+        // 获取远端订单数据
+        $remote = $order->settlement_payload['remote_order'] ?? [];
+        if (empty($remote)) {
+            $this->error('没有远端订单数据');
+            return self::FAILURE;
+        }
+
+        // 调用 buildSettlementSnapshot
+        $snapshot = $service->buildSettlementSnapshot($order, $remote);
+
+        $this->info('Settlement Snapshot:');
+        $this->line('Is Settled: ' . ($snapshot['is_settled'] ? 'true' : 'false'));
+        $this->line('Winning Outcome: ' . ($snapshot['winning_outcome'] ?? 'null'));
+        $this->line('Is Win: ' . (isset($snapshot['is_win']) ? ($snapshot['is_win'] ? 'true' : 'false') : 'null'));
+        $this->line('PNL USDC: ' . ($snapshot['pnl_usdc'] ?? 'null'));
+        $this->line('Settlement Source: ' . ($snapshot['settlement_source'] ?? 'null'));
+
+
+        exit;
         $wallet = PmCustodyWallet::query()
             ->with('apiCredentials')
             ->where('status', PmCustodyWallet::STATUS_ENABLED)

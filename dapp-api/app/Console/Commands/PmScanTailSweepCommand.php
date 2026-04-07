@@ -266,7 +266,7 @@ class PmScanTailSweepCommand extends Command
             }
 
             if (!$triggered) {
-                $this->info("Task {$task->id}: 未满足任何触发条件，跳过");
+                // $this->info("Task {$task->id}: 未满足任何触发条件，跳过");
                 continue;
             }
 
