@@ -70,10 +70,10 @@ class PmSettleAndClaimOrderCommand extends Command
                 ['字段', '值'],
                 [
                     ['订单ID', $order->id],
-                    ['任务ID', $order->copy_task_id],
-                    ['方向', $order->side === 'BUY' ? '买入' : '卖出'],
-                    ['数量', $order->filled_size],
-                    ['成交额', sprintf('%.4f USDC', $order->filled_usdc / 1000000)],
+                    ['意图ID', $order->order_intent_id],
+                    ['方向', $order->outcome ?? '-'],
+                    ['数量', $order->filled_size ?? '-'],
+                    ['成交额', sprintf('%.4f USDC', ($order->filled_usdc ?? 0) / 1000000)],
                     ['当前状态', $this->getStatusText($order->status)],
                     ['结算状态', $order->is_settled ? '✓ 已结算' : '✗ 未结算'],
                     ['兑奖状态', $this->getClaimStatusText($order->claim_status)],
@@ -96,9 +96,9 @@ class PmSettleAndClaimOrderCommand extends Command
                         ['字段', '值'],
                         [
                             ['是否盈利', $order->is_win ? '✓ 盈利' : '✗ 亏损'],
-                            ['盈亏(PNL)', sprintf('%+.4f USDC', $order->pnl_usdc / 1000000)],
-                            ['盈利金额', sprintf('%.4f USDC', $order->profit_usdc / 1000000)],
-                            ['结算时间', $order->settled_at?->format('Y-m-d H:i:s')],
+                            ['盈亏(PNL)', sprintf('%+.4f USDC', ($order->pnl_usdc ?? 0) / 1000000)],
+                            ['盈利金额', sprintf('%.4f USDC', ($order->profit_usdc ?? 0) / 1000000)],
+                            ['结算时间', $order->settled_at?->format('Y-m-d H:i:s') ?? '-'],
                             ['结算来源', $order->settlement_source ?? '-'],
                         ]
                     );
@@ -132,7 +132,7 @@ class PmSettleAndClaimOrderCommand extends Command
             }
 
             $forceClaim = $this->option('force-claim');
-            if (!$forceClaim && in_array($order->claim_status, [PmOrder::CLAIM_STATUS_CONFIRMED, PmOrder::CLAIM_STATUS_RECEIPT_CONFIRMED])) {
+            if (!$forceClaim && $order->claim_status == PmOrder::CLAIM_STATUS_CONFIRMED) {
                 $this->info('⏭️  跳过兑奖（已兑奖到账）');
                 $this->newLine();
                 continue;
@@ -144,7 +144,7 @@ class PmSettleAndClaimOrderCommand extends Command
                     $order->update([
                         'claim_status' => PmOrder::CLAIM_STATUS_PENDING,
                         'claim_tx_hash' => null,
-                        'claim_error' => null,
+                        'claim_last_error' => null,
                     ]);
                     $this->info('🔄 已重置兑奖状态');
                 }
@@ -162,8 +162,7 @@ class PmSettleAndClaimOrderCommand extends Command
                     $waited += 2;
                     $order->refresh();
 
-                    if ($order->claim_status == PmOrder::CLAIM_STATUS_CONFIRMED ||
-                        $order->claim_status == PmOrder::CLAIM_STATUS_RECEIPT_CONFIRMED) {
+                    if ($order->claim_status == PmOrder::CLAIM_STATUS_CONFIRMED) {
                         $stats['claimed']++;
                         $this->info('✓ 兑奖成功并确认到账');
                         $this->table(
@@ -171,14 +170,14 @@ class PmSettleAndClaimOrderCommand extends Command
                             [
                                 ['兑奖状态', $this->getClaimStatusText($order->claim_status)],
                                 ['交易哈希', $order->claim_tx_hash ?? '-'],
-                                ['兑奖金额', sprintf('%.4f USDC', $order->profit_usdc / 1000000)],
+                                ['兑奖金额', sprintf('%.4f USDC', ($order->profit_usdc ?? 0) / 1000000)],
                             ]
                         );
                         break;
                     } elseif ($order->claim_status == PmOrder::CLAIM_STATUS_FAILED) {
                         $stats['failed']++;
                         $this->error('✗ 兑奖失败');
-                        $this->error("失败原因: " . ($order->claim_error ?? '未知错误'));
+                        $this->error("失败原因: " . ($order->claim_last_error ?? '未知错误'));
                         if ($order->claim_tx_hash) {
                             $this->error("交易哈希: {$order->claim_tx_hash}");
                         }
@@ -241,7 +240,7 @@ class PmSettleAndClaimOrderCommand extends Command
     private function getClaimStatusText(int $status): string
     {
         return match ($status) {
-            PmOrder::CLAIM_STATUS_NONE => '无需兑奖',
+            PmOrder::CLAIM_STATUS_NOT_NEEDED => '无需兑奖',
             PmOrder::CLAIM_STATUS_PENDING => '待兑奖',
             PmOrder::CLAIM_STATUS_CLAIMING => '兑奖中',
             PmOrder::CLAIM_STATUS_CLAIMED => '已兑奖',
