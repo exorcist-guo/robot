@@ -83,7 +83,45 @@ class PmSettleAndClaimOrderCommand extends Command
             // 步骤1: 结算
             $this->info('📊 步骤1: 同步结算状态');
             try {
+                $this->line('  → 调用 syncService->sync()...');
                 $result = $syncService->sync($order, false, false);
+
+                $this->line('  → 同步结果: ' . json_encode([
+                    'updated' => $result['updated'] ?? false,
+                    'reason' => $result['reason'] ?? null,
+                ]));
+
+                if (isset($result['snapshot'])) {
+                    $snapshot = $result['snapshot'];
+                    $this->line('  → 结算快照:');
+                    $this->line('    - is_settled: ' . ($snapshot['is_settled'] ? 'true' : 'false'));
+                    $this->line('    - winning_outcome: ' . ($snapshot['winning_outcome'] ?? 'null'));
+                    $this->line('    - settlement_source: ' . ($snapshot['settlement_source'] ?? 'null'));
+                    $this->line('    - is_win: ' . ($snapshot['is_win'] === null ? 'null' : ($snapshot['is_win'] ? 'true' : 'false')));
+                    $this->line('    - pnl_usdc: ' . ($snapshot['pnl_usdc'] ?? 'null'));
+                    $this->line('    - profit_usdc: ' . ($snapshot['profit_usdc'] ?? 'null'));
+
+                    if (isset($result['snapshot']['settlement_payload'])) {
+                        $payload = $result['snapshot']['settlement_payload'];
+                        $this->line('  → settlement_payload:');
+                        $this->line('    - condition_id: ' . ($payload['condition_id'] ?? 'null'));
+                        $this->line('    - market存在: ' . (isset($payload['market']) ? 'yes' : 'no'));
+                        $this->line('    - market_tokens存在: ' . (isset($payload['market_tokens']) ? 'yes' : 'no'));
+
+                        if (isset($payload['market'])) {
+                            $market = $payload['market'];
+                            $this->line('    - market.closed: ' . ($market['closed'] ?? 'null'));
+                            $this->line('    - market.umaResolutionStatus: ' . ($market['umaResolutionStatus'] ?? 'null'));
+                        }
+
+                        if (isset($payload['market_tokens'])) {
+                            $this->line('    - market_tokens:');
+                            foreach ($payload['market_tokens'] as $token) {
+                                $this->line('      * ' . ($token['outcome'] ?? '?') . ': winner=' . ($token['winner'] ?? 'null') . ', price=' . ($token['price'] ?? 'null'));
+                            }
+                        }
+                    }
+                }
 
                 $order->refresh();
 
