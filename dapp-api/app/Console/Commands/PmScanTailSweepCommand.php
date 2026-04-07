@@ -52,7 +52,7 @@ class PmScanTailSweepCommand extends Command
         );
 
         try {
-            // $lock->block(1);
+            $lock->block(1);
         } catch (LockTimeoutException) {
             $this->warn('已有扫尾盘扫描 daemon 正在运行，当前进程退出');
 
@@ -248,7 +248,7 @@ class PmScanTailSweepCommand extends Command
             $change = bcsub($currentPrice, $startPrice, 8);
             $absChange = bcmul($change, $change[0] === '-' ? '-1' : '1', 8); // 取绝对值
 
-            $this->info("Task {$task->id}: remainingSeconds={$remainingSeconds}, currentPrice={$currentPrice}, startPrice={$startPrice}, change={$change}, absChange={$absChange}");
+            // $this->info("Task {$task->id}: remainingSeconds={$remainingSeconds}, currentPrice={$currentPrice}, startPrice={$startPrice}, change={$change}, absChange={$absChange}");
 
             // 遍历价格-时间阈值配置，从大到小检查（已按key降序排列）
             $triggered = false;
@@ -338,7 +338,7 @@ class PmScanTailSweepCommand extends Command
             }
 
             if (!$side || !$triggerSide || $tokenId === '') {
-                var_dump("任务 {$task->id} 跳过本轮扫描，无触发条件价格差是{$change}限制价差是{$threshold}");
+                // var_dump("任务 {$task->id} 跳过本轮扫描，无触发条件价格差是{$change}限制价差是{$threshold}");
                 continue;
             }
 
@@ -405,7 +405,7 @@ class PmScanTailSweepCommand extends Command
             $task->save();
 
             // 交给统一下单执行任务同步处理，便于调试和立即获取结果。
-            PmExecuteOrderIntentJob::dispatchSync($intent->id);
+            PmExecuteOrderIntentJob::dispatch($intent->id);
             $intent->refresh();
             $order = $intent->order()->latest('id')->first();
             $this->info("任务 {$task->id} 已触发扫尾盘下单 - Intent: {$intent->id}, Order: ".($order?->id ?? 'N/A').", Status: ".($order ? (int) $order->status : 'N/A'));
