@@ -100,6 +100,7 @@ class PmCopyTask extends Model
         'allow_partial_fill' => 'boolean',
         'market_end_at' => 'datetime',
         'tail_loss_stopped_at' => 'datetime',
+        'tail_price_time_config' => 'array',
     ];
 
     public function member(): BelongsTo

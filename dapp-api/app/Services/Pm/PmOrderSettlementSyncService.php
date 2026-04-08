@@ -268,24 +268,45 @@ class PmOrderSettlementSyncService
         }
 
         $winningOutcome = null;
+        $settlementSource = null;
+
+        // 首先尝试从 Polymarket 获取赢家
         foreach ($tokens as $token) {
             if (is_array($token)) {
                 $winner = $token['winner'] ?? false;
                 // winner 可能是 true, 1, "1", "true" 等
                 if ($winner === true || $winner === 1 || $winner === '1' || $winner === 'true') {
                     $winningOutcome = $this->normalizeOutcome((string) ($token['outcome'] ?? ''));
+                    $settlementSource = 'market_winner';
                     break;
                 }
             }
         }
 
         $marketEndAt = $this->orderMarketEndAt($order, $market);
+
+        // 如果 Polymarket 还没有确定赢家，但市场已经结束超过 5 分钟，尝试备用逻辑
+        $minutesSinceEnd = $marketEndAt ? abs(now()->diffInMinutes($marketEndAt, false)) : 0;
+        if ($winningOutcome === null && $marketEndAt !== null && now()->gte($marketEndAt) && $minutesSinceEnd >= 5) {
+            $fallbackResult = $this->resolveTailSweepFallback($order, $market, $tokens);
+            if ($fallbackResult !== null) {
+                [$winningOutcome, $settlementSource] = $fallbackResult;
+                \Log::info('PmOrderSettlementSync::使用备用结算逻辑', [
+                    'order_id' => $order->id,
+                    'winning_outcome' => $winningOutcome,
+                    'source' => $settlementSource,
+                    'minutes_since_end' => $minutesSinceEnd,
+                ]);
+            }
+        }
+
         $isSettled = $winningOutcome !== null && ($marketEndAt === null || now()->gte($marketEndAt));
 
         // 调试日志（无条件输出）
         \Log::info('PmOrderSettlementSync::resolveSettlement', [
             'order_id' => $order->id,
             'winning_outcome' => $winningOutcome,
+            'settlement_source' => $settlementSource,
             'market_end_at' => $marketEndAt?->toDateTimeString(),
             'now' => now()->toDateTimeString(),
             'is_after_end' => $marketEndAt === null ? 'null' : now()->gte($marketEndAt),
@@ -304,8 +325,78 @@ class PmOrderSettlementSyncService
                 'market_tokens' => $tokens,
                 'remote_order' => $remote,
             ],
-            $isSettled ? 'market_winner' : null,
+            $settlementSource,
         ];
+    }
+
+    /**
+     * 备用结算逻辑：对于扫尾盘任务，根据价格判断赢家
+     * @param array<string,mixed> $market
+     * @param array<int,array<string,mixed>> $tokens
+     * @return array{0:string,1:string}|null
+     */
+    private function resolveTailSweepFallback(PmOrder $order, array $market, array $tokens): ?array
+    {
+        // 只对扫尾盘任务使用备用逻辑
+        $copyTask = $order->intent?->copyTask;
+        if (!$copyTask || $copyTask->mode !== \App\Models\Pm\PmCopyTask::MODE_TAIL_SWEEP) {
+            return null;
+        }
+
+        // 检查是否是 BTC/ETH Up or Down 市场
+        $question = strtolower((string) ($market['question'] ?? ''));
+        if (!str_contains($question, 'up or down')) {
+            return null;
+        }
+
+        // 获取市场的 price_to_beat（开始价格）
+        $priceToBeat = $copyTask->price_to_beat;
+        if ($priceToBeat === null || !is_numeric($priceToBeat)) {
+            return null;
+        }
+
+        // 从 token 价格推断最终结果
+        // 如果 Up token 价格接近 1，说明价格上涨；如果 Down token 价格接近 1，说明价格下跌
+        $upPrice = null;
+        $downPrice = null;
+
+        foreach ($tokens as $token) {
+            $outcome = strtolower((string) ($token['outcome'] ?? ''));
+            $price = (string) ($token['price'] ?? '0');
+
+            if ($outcome === 'up') {
+                $upPrice = $price;
+            } elseif ($outcome === 'down') {
+                $downPrice = $price;
+            }
+        }
+
+        if ($upPrice === null || $downPrice === null) {
+            return null;
+        }
+
+        // 如果某个方向的价格 >= 0.9，认为该方向获胜
+        if (bccomp($upPrice, '0.9', 8) >= 0) {
+            return ['Up', 'fallback_price_analysis'];
+        }
+
+        if (bccomp($downPrice, '0.9', 8) >= 0) {
+            return ['Down', 'fallback_price_analysis'];
+        }
+
+        // 如果价格差异明显（> 0.3），选择价格更高的一方
+        $priceDiff = bcsub($upPrice, $downPrice, 8);
+        $absPriceDiff = bccomp($priceDiff, '0', 8) >= 0 ? $priceDiff : bcmul($priceDiff, '-1', 8);
+
+        if (bccomp($absPriceDiff, '0.3', 8) > 0) {
+            if (bccomp($upPrice, $downPrice, 8) > 0) {
+                return ['Up', 'fallback_price_comparison'];
+            } else {
+                return ['Down', 'fallback_price_comparison'];
+            }
+        }
+
+        return null;
     }
 
     /**

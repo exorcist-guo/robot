@@ -10,6 +10,8 @@ const resolvingLeader = ref(false)
 const resolvingMarket = ref(false)
 const deletingTaskId = ref<number | null>(null)
 const togglingTaskId = ref<number | null>(null)
+const editingTask = ref<any>(null)
+const showEditDialog = ref(false)
 const leaders = ref<any[]>([])
 const form = reactive({
   mode: 'leader_copy',
@@ -32,6 +34,18 @@ const form = reactive({
   tail_trigger_amount: '200',
   tail_time_limit_seconds: 30,
   tail_loss_stop_count: 0,
+  tail_price_time_config: [] as any[],
+})
+
+const editForm = reactive({
+  ratio_bps: 10000,
+  min_usdc: 0,
+  max_usdc: 0,
+  tail_order_usdc: 0,
+  tail_trigger_amount: '200',
+  tail_time_limit_seconds: 30,
+  tail_loss_stop_count: 0,
+  tail_price_time_config: [] as any[],
 })
 
 const isLeaderMode = computed(() => form.mode === 'leader_copy')
@@ -130,6 +144,17 @@ const saveTask = async () => {
         showFailToast('请先解析市场')
         return
       }
+      // 转换价格-时间配置为后端需要的格式
+      let priceTimeConfig = null
+      if (form.tail_price_time_config.length > 0) {
+        const config: any = {}
+        config[form.market_symbol] = {}
+        form.tail_price_time_config.forEach((rule: any) => {
+          config[form.market_symbol][rule.price] = rule.time
+        })
+        priceTimeConfig = config
+      }
+
       await http.post('/copy-tasks', {
         mode: 'tail_sweep',
         market_slug: form.market_slug,
@@ -145,6 +170,7 @@ const saveTask = async () => {
         tail_trigger_amount: form.tail_trigger_amount,
         tail_time_limit_seconds: form.tail_time_limit_seconds,
         tail_loss_stop_count: form.tail_loss_stop_count,
+        tail_price_time_config: priceTimeConfig,
       })
     }
     await store.fetchCopyTasks()
@@ -202,6 +228,92 @@ const removeTask = async (task: any) => {
   }
 }
 
+const openEditDialog = (task: any) => {
+  console.log('打开编辑对话框，任务数据:', task)
+  editingTask.value = task
+  if (task.mode === 'tail_sweep') {
+    editForm.tail_order_usdc = parseInt(task.tail_order_usdc) || 0
+    editForm.tail_trigger_amount = task.tail_trigger_amount || '200'
+    editForm.tail_time_limit_seconds = task.tail_time_limit_seconds || 30
+    editForm.tail_loss_stop_count = task.tail_loss_stop_count || 0
+
+    // 转换后端对象格式为前端数组格式
+    const config = task.tail_price_time_config
+    console.log('原始配置:', config)
+    if (config && typeof config === 'object') {
+      const symbol = task.market?.symbol || 'btc/usd'
+      console.log('标的:', symbol)
+      const symbolConfig = config[symbol]
+      console.log('标的配置:', symbolConfig)
+      if (symbolConfig && typeof symbolConfig === 'object') {
+        editForm.tail_price_time_config = Object.entries(symbolConfig).map(([price, time]) => ({
+          price: parseInt(price),
+          time: time as number
+        }))
+        console.log('转换后的配置数组:', editForm.tail_price_time_config)
+      } else {
+        editForm.tail_price_time_config = []
+      }
+    } else {
+      editForm.tail_price_time_config = []
+    }
+  } else {
+    editForm.ratio_bps = task.ratio_bps || 10000
+    editForm.min_usdc = parseInt(task.min_usdc) || 0
+    editForm.max_usdc = parseInt(task.max_usdc) || 0
+  }
+  showEditDialog.value = true
+}
+
+const addPriceTimeRule = () => {
+  editForm.tail_price_time_config.push({ price: 100, time: 60 })
+}
+
+const removePriceTimeRule = (index: number) => {
+  editForm.tail_price_time_config.splice(index, 1)
+}
+
+const saveEdit = async () => {
+  if (!editingTask.value) return
+
+  try {
+    const payload: any = {}
+    if (editingTask.value.mode === 'tail_sweep') {
+      payload.tail_order_usdc = editForm.tail_order_usdc
+      payload.tail_trigger_amount = editForm.tail_trigger_amount
+      payload.tail_time_limit_seconds = editForm.tail_time_limit_seconds
+      payload.tail_loss_stop_count = editForm.tail_loss_stop_count
+
+      // 转换价格-时间配置为后端需要的格式
+      const symbol = editingTask.value.market?.symbol || 'btc/usd'
+      if (editForm.tail_price_time_config.length > 0) {
+        const config: any = {}
+        config[symbol] = {}
+        editForm.tail_price_time_config.forEach((rule: any) => {
+          const priceKey = String(rule.price)
+          config[symbol][priceKey] = Number(rule.time)
+        })
+        payload.tail_price_time_config = config
+      } else {
+        payload.tail_price_time_config = null
+      }
+    } else {
+      payload.ratio_bps = editForm.ratio_bps
+      payload.min_usdc = editForm.min_usdc
+      payload.max_usdc = editForm.max_usdc
+    }
+
+    console.log('保存编辑 payload:', payload)
+    await http.put(`/copy-tasks/${editingTask.value.id}`, payload)
+    await store.fetchCopyTasks()
+    showSuccessToast('任务已更新')
+    showEditDialog.value = false
+  } catch (error: any) {
+    console.error('保存失败:', error)
+    showFailToast(error.response?.data?.msg || error.message || '更新失败')
+  }
+}
+
 const loadLeaders = async () => {
   const { data } = await http.get('/leaders')
   leaders.value = data.data.list || []
@@ -249,6 +361,21 @@ onMounted(() => {
           <van-field v-model="form.tail_trigger_amount" label="触发阈值" />
           <van-field v-model.number="form.tail_time_limit_seconds" label="限制时间(秒)" type="number" />
           <van-field v-model.number="form.tail_loss_stop_count" label="亏损停止单数" type="number" />
+          <div style="padding: 10px 16px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+              <span style="font-size: 14px; color: #646566;">价格-时间配置</span>
+              <van-button size="mini" type="primary" @click="form.tail_price_time_config.push({ price: 100, time: 60 })">添加规则</van-button>
+            </div>
+            <div v-for="(rule, index) in form.tail_price_time_config" :key="index" style="display: flex; gap: 8px; margin-bottom: 8px; align-items: center;">
+              <van-field v-model.number="rule.price" placeholder="价格变化" type="number" style="flex: 1;" />
+              <span style="color: #969799;">→</span>
+              <van-field v-model.number="rule.time" placeholder="时间(秒)" type="number" style="flex: 1;" />
+              <van-button size="mini" type="danger" @click="form.tail_price_time_config.splice(index, 1)">删除</van-button>
+            </div>
+            <div v-if="form.tail_price_time_config.length === 0" style="font-size: 12px; color: #969799; text-align: center; padding: 8px;">
+              未配置时使用系统默认规则
+            </div>
+          </div>
         </template>
       </van-cell-group>
       <div class="actions-stack">
@@ -330,6 +457,13 @@ onMounted(() => {
             </van-button>
             <van-button
               size="small"
+              type="success"
+              @click="openEditDialog(item)"
+            >
+              编辑
+            </van-button>
+            <van-button
+              size="small"
               type="danger"
               :loading="deletingTaskId === item.id"
               :disabled="togglingTaskId !== null || (deletingTaskId !== null && deletingTaskId !== item.id)"
@@ -342,6 +476,37 @@ onMounted(() => {
       </div>
       <div v-else class="surface-card empty-state">暂无任务，创建成功后可在此点击切换启用或暂停状态。</div>
     </section>
+
+    <van-dialog v-model:show="showEditDialog" title="编辑任务" show-cancel-button @confirm="saveEdit">
+      <van-cell-group inset style="margin: 16px 0;">
+        <template v-if="editingTask?.mode === 'tail_sweep'">
+          <van-field v-model.number="editForm.tail_order_usdc" label="下单金额(1e6)" type="number" />
+          <van-field v-model="editForm.tail_trigger_amount" label="触发阈值" />
+          <van-field v-model.number="editForm.tail_time_limit_seconds" label="限制时间(秒)" type="number" />
+          <van-field v-model.number="editForm.tail_loss_stop_count" label="亏损停止单数" type="number" />
+          <div style="padding: 10px 16px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+              <span style="font-size: 14px; color: #646566;">价格-时间配置</span>
+              <van-button size="mini" type="primary" @click="addPriceTimeRule">添加规则</van-button>
+            </div>
+            <div v-for="(rule, index) in editForm.tail_price_time_config" :key="index" style="display: flex; gap: 8px; margin-bottom: 8px; align-items: center;">
+              <van-field v-model.number="rule.price" placeholder="价格变化" type="number" style="flex: 1;" />
+              <span style="color: #969799;">→</span>
+              <van-field v-model.number="rule.time" placeholder="时间(秒)" type="number" style="flex: 1;" />
+              <van-button size="mini" type="danger" @click="removePriceTimeRule(index)">删除</van-button>
+            </div>
+            <div v-if="editForm.tail_price_time_config.length === 0" style="font-size: 12px; color: #969799; text-align: center; padding: 8px;">
+              未配置时使用系统默认规则
+            </div>
+          </div>
+        </template>
+        <template v-else>
+          <van-field v-model.number="editForm.ratio_bps" label="比例(bps)" type="number" />
+          <van-field v-model.number="editForm.min_usdc" label="最小USDC" type="number" />
+          <van-field v-model.number="editForm.max_usdc" label="最大USDC" type="number" />
+        </template>
+      </van-cell-group>
+    </van-dialog>
   </div>
 </template>
 

@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>测试编辑任务</title>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+</head>
+<body>
+    <h1>测试编辑任务 API</h1>
+    <div id="result"></div>
+
+    <script>
+        const http = axios.create({
+            baseURL: 'http://test.robot.xyz/api',
+            timeout: 15000,
+        });
+
+        // 添加 token
+        const token = localStorage.getItem('token');
+        if (token) {
+            http.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+        }
+
+        async function testUpdate() {
+            const resultDiv = document.getElementById('result');
+
+            try {
+                // 1. 获取任务列表
+                resultDiv.innerHTML += '<h2>1. 获取任务列表</h2>';
+                const { data: listData } = await http.get('/copy-tasks');
+                console.log('任务列表:', listData);
+
+                const tailSweepTask = listData.data.list.find(t => t.mode === 'tail_sweep');
+                if (!tailSweepTask) {
+                    resultDiv.innerHTML += '<p style="color: red;">未找到扫尾盘任务</p>';
+                    return;
+                }
+
+                resultDiv.innerHTML += `<p>找到任务 ID: ${tailSweepTask.id}</p>`;
+                resultDiv.innerHTML += `<p>当前配置: ${JSON.stringify(tailSweepTask.tail_price_time_config)}</p>`;
+
+                // 2. 准备更新数据
+                const updatePayload = {
+                    tail_order_usdc: tailSweepTask.tail_order_usdc,
+                    tail_trigger_amount: tailSweepTask.tail_trigger_amount,
+                    tail_time_limit_seconds: tailSweepTask.tail_time_limit_seconds,
+                    tail_loss_stop_count: tailSweepTask.tail_loss_stop_count,
+                    tail_price_time_config: {
+                        'btc/usd': {
+                            '200': 180,
+                            '100': 120,
+                            '50': 80
+                        }
+                    }
+                };
+
+                resultDiv.innerHTML += '<h2>2. 发送更新请求</h2>';
+                resultDiv.innerHTML += `<pre>${JSON.stringify(updatePayload, null, 2)}</pre>`;
+
+                const { data: updateData } = await http.put(`/copy-tasks/${tailSweepTask.id}`, updatePayload);
+                console.log('更新结果:', updateData);
+
+                resultDiv.innerHTML += '<p style="color: green;">✓ 更新成功!</p>';
+
+                // 3. 验证更新
+                resultDiv.innerHTML += '<h2>3. 验证更新</h2>';
+                const { data: verifyData } = await http.get('/copy-tasks');
+                const updatedTask = verifyData.data.list.find(t => t.id === tailSweepTask.id);
+                resultDiv.innerHTML += `<p>更新后配置: ${JSON.stringify(updatedTask.tail_price_time_config)}</p>`;
+
+            } catch (error) {
+                console.error('错误:', error);
+                resultDiv.innerHTML += `<p style="color: red;">错误: ${error.message}</p>`;
+                if (error.response) {
+                    resultDiv.innerHTML += `<pre>${JSON.stringify(error.response.data, null, 2)}</pre>`;
+                }
+            }
+        }
+
+        // 页面加载后自动测试
+        window.onload = () => {
+            const token = prompt('请输入 token (从浏览器 localStorage 获取):');
+            if (token) {
+                localStorage.setItem('token', token);
+                testUpdate();
+            }
+        };
+    </script>
+</body>
+</html>

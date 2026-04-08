@@ -129,6 +129,7 @@ class PmScanTailSweepCommand extends Command
                 'max_slippage_bps',
                 'allow_partial_fill',
                 'daily_max_usdc',
+                'tail_price_time_config',
             ]));
 
         // 同一轮扫描内按 symbol / token+side 做缓存，避免重复请求外部数据。
@@ -215,14 +216,15 @@ class PmScanTailSweepCommand extends Command
                 continue;
             }
 
-            //价格时间限制配置：[价格变化阈值 => 时间限制(秒)]
-            $limit_time_price = [
-                'btc/usd' => [200 => 180, 100 => 120, 50=>80,40 => 60,35 =>50,30=>30],
+            // 价格时间限制配置：优先使用任务自定义配置，否则使用默认配置
+            $taskConfig = is_array($task->tail_price_time_config) ? $task->tail_price_time_config : [];
+            $defaultConfig = [
+                'btc/usd' => [200 => 180, 100 => 120, 50 => 80, 40 => 60, 35 => 50, 30 => 30],
                 'eth/usd' => [200 => 180, 100 => 120, 30 => 60, 20 => 30],
             ];
 
             // 获取当前标的的配置，如果没有配置则跳过
-            $symbolConfig = $limit_time_price[$symbol] ?? null;
+            $symbolConfig = $taskConfig[$symbol] ?? $defaultConfig[$symbol] ?? null;
             if (!$symbolConfig) {
                 $this->warn("标的 {$symbol} 没有配置价格-时间阈值，跳过");
                 continue;

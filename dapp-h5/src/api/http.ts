@@ -2,7 +2,7 @@ import axios from 'axios'
 import type { ApiResponse } from '../types/api'
 
 const http = axios.create({
-  baseURL: 'https://dhbapi.88888888.mom/api',
+  baseURL: 'http://test.robot.xyz/api',
   timeout: 15000,
 })
 

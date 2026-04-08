@@ -41,6 +41,7 @@ class CopyTaskController extends Controller
                 'tail_time_limit_seconds',
                 'tail_loss_stop_count',
                 'tail_loss_count',
+                'tail_price_time_config',
                 'market_slug',
                 'market_id',
                 'market_question',
@@ -71,6 +72,7 @@ class CopyTaskController extends Controller
                 'tail_time_limit_seconds' => $t->tail_time_limit_seconds,
                 'tail_loss_stop_count' => $t->tail_loss_stop_count,
                 'tail_loss_count' => $t->tail_loss_count,
+                'tail_price_time_config' => $t->tail_price_time_config,
                 'market' => [
                     'slug' => $t->market_slug,
                     'market_id' => $t->market_id,
@@ -248,6 +250,7 @@ class CopyTaskController extends Controller
         $tailTriggerAmount = trim((string) $request->input('tail_trigger_amount', '0'));
         $tailTimeLimitSeconds = max(1, (int) $request->input('tail_time_limit_seconds', 30));
         $tailLossStopCount = max(0, (int) $request->input('tail_loss_stop_count', 0));
+        $tailPriceTimeConfig = $request->input('tail_price_time_config');
 
         if ($marketSlug === '' || $marketId === '') {
             return $this->error('market 信息必填');
@@ -282,6 +285,7 @@ class CopyTaskController extends Controller
             'tail_trigger_amount' => $tailTriggerAmount,
             'tail_time_limit_seconds' => $tailTimeLimitSeconds,
             'tail_loss_stop_count' => $tailLossStopCount,
+            'tail_price_time_config' => is_array($tailPriceTimeConfig) && $tailPriceTimeConfig !== [] ? $tailPriceTimeConfig : null,
         ]);
 
         $task = PmCopyTask::withTrashed()
@@ -313,7 +317,7 @@ class CopyTaskController extends Controller
     private function updateTailSweep(Request $request, PmCopyTask $task)
     {
         $fields = [];
-        foreach (['tail_order_usdc', 'tail_trigger_amount', 'tail_time_limit_seconds', 'tail_loss_stop_count'] as $k) {
+        foreach (['tail_order_usdc', 'tail_trigger_amount', 'tail_time_limit_seconds', 'tail_loss_stop_count', 'tail_price_time_config'] as $k) {
             if ($request->has($k)) {
                 $fields[$k] = $request->input($k);
             }
@@ -337,6 +341,16 @@ class CopyTaskController extends Controller
         }
         if (isset($fields['tail_loss_stop_count'])) {
             $fields['tail_loss_stop_count'] = max(0, (int) $fields['tail_loss_stop_count']);
+        }
+        if (isset($fields['tail_price_time_config'])) {
+            $config = $fields['tail_price_time_config'];
+            if ($config === null || $config === '' || $config === []) {
+                $fields['tail_price_time_config'] = null;
+            } elseif (is_array($config)) {
+                $fields['tail_price_time_config'] = $config;
+            } else {
+                return $this->error('tail_price_time_config 格式不正确');
+            }
         }
 
         $task->fill(array_merge($fields, $this->normalizeCommonRiskFieldsForPatch($request, true)));
