@@ -20,6 +20,7 @@ class PmSyncOrderSettlementCommand extends Command
 
     public function handle(PmOrderSettlementSyncService $service): int
     {
+
         $query = PmOrder::query()
             ->with('intent.copyTask.member.custodyWallet.apiCredentials')
             ->whereNotNull('poly_order_id')
