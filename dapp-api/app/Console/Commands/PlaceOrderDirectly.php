@@ -336,6 +336,16 @@ class PlaceOrderDirectly extends Command
         return $baseSlug.'-'.$timestamp;
     }
 
+    private function buildCurrentRoundSlugFromString(string $baseSlug, string $dateTimeString): string
+    {
+        $now = Carbon::parse($dateTimeString);
+        $minutes = (int) $now->format('i');
+        $targetMinutes = (int) (floor($minutes / 5) * 5);
+        $timestamp = strtotime($now->format('Y-m-d H:').sprintf('%02d', $targetMinutes).':00');
+
+        return $baseSlug.'-'.$timestamp;
+    }
+
     private function starTime( Carbon $now): string
     {
         $minutes = (int) $now->format('i');

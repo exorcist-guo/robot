@@ -192,7 +192,7 @@ class PmSettleAndClaimOrderCommand extends Command
                     $this->info('🔄 已重置兑奖状态');
                 }
 
-                PmClaimOrderJob::dispatch($order->id);
+                \App\Jobs\PmAutoClaimOrderWinningsJob::dispatch($order->id);
                 $this->info('✓ 兑奖任务已加入队列');
 
                 // 等待兑奖完成

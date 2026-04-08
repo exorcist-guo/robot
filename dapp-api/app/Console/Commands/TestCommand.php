@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\Models\Pm\PmCustodyWallet;
 use App\Services\Pm\PolymarketTradingService;
 use Illuminate\Console\Command;
+use Illuminate\Support\Carbon;
 
 class TestCommand extends Command
 {
@@ -27,6 +28,10 @@ class TestCommand extends Command
      */
     public function handle(PolymarketTradingService $trading)
     {
+
+        $a = $this->buildCurrentRoundSlugFromString('2026-04-07 18:49:03');
+        echo $a;
+        exit;
         $order = \App\Models\Pm\PmOrder::find(360);
         if (!$order) {
             $this->error('订单不存在');
@@ -90,5 +95,16 @@ class TestCommand extends Command
         $this->line(json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
 
         return self::SUCCESS;
+    }
+
+    private function buildCurrentRoundSlugFromString(string $dateTimeString): string
+    {
+        $baseSlug = 'btc-updown-5m';
+        $now = Carbon::parse($dateTimeString);
+        $minutes = (int) $now->format('i');
+        $targetMinutes = (int) (floor($minutes / 5) * 5);
+        $timestamp = strtotime($now->format('Y-m-d H:').sprintf('%02d', $targetMinutes).':00');
+
+        return $baseSlug.'-'.$timestamp;
     }
 }

@@ -283,6 +283,32 @@ class PmOrderSettlementSyncService
             }
         }
 
+        // 如果 token 的 winner 还没更新，但市场已经解决（umaResolutionStatus=resolved），使用 outcomePrices 判断
+        if ($winningOutcome === null) {
+            $umaResolutionStatus = $market['umaResolutionStatus'] ?? null;
+            if ($umaResolutionStatus === 'resolved') {
+                $outcomes = json_decode($market['outcomes'] ?? '[]', true);
+                $outcomePrices = json_decode($market['outcomePrices'] ?? '[]', true);
+
+                if (is_array($outcomes) && is_array($outcomePrices)) {
+                    foreach ($outcomes as $idx => $outcome) {
+                        $price = $outcomePrices[$idx] ?? null;
+                        if ($price === '1' || $price === 1) {
+                            $winningOutcome = $this->normalizeOutcome((string) $outcome);
+                            $settlementSource = 'market_outcome_prices';
+                            \Log::info('PmOrderSettlementSync::使用 outcomePrices 判断赢家', [
+                                'order_id' => $order->id,
+                                'winning_outcome' => $winningOutcome,
+                                'outcomes' => $outcomes,
+                                'outcomePrices' => $outcomePrices,
+                            ]);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         $marketEndAt = $this->orderMarketEndAt($order, $market);
 
         // 如果 Polymarket 还没有确定赢家，但市场已经结束超过 5 分钟，尝试备用逻辑
@@ -816,10 +842,17 @@ class PmOrderSettlementSyncService
     private function fetchResolvedMarket(string $conditionId, PmOrder $order): array
     {
         // 优先使用已有的 settlement_payload 中的市场数据（避免重复API调用）
+        // 但如果市场未解决且订单未结算，则跳过缓存强制刷新
         if (is_array($order->settlement_payload) && isset($order->settlement_payload['market'])) {
             $cachedMarket = $order->settlement_payload['market'];
             if (is_array($cachedMarket) && $cachedMarket !== [] && $this->marketMatchesCondition($cachedMarket, $conditionId)) {
-                return $cachedMarket;
+                // 如果订单未结算且缓存的市场也未解决，跳过缓存强制刷新
+                $cachedResolutionStatus = $cachedMarket['umaResolutionStatus'] ?? null;
+                if (!$order->is_settled && $cachedResolutionStatus !== 'resolved') {
+                    // 跳过缓存，继续执行下面的 API 查询
+                } else {
+                    return $cachedMarket;
+                }
             }
         }
 
