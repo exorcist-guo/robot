@@ -908,7 +908,7 @@ class PmOrderSettlementSyncService
                     'market_id' => $gammaMarketId,
                 ]);
                 $market = $this->gammaMarketById($gammaMarketId);
-                if ($market !== []) {
+                if ($market !== [] && $this->marketMatchesCondition($market, $conditionId)) {
                     \Log::info('fetchResolvedMarket: Gamma API 成功', [
                         'order_id' => $order->id,
                         'market_id' => $gammaMarketId,
@@ -916,9 +916,11 @@ class PmOrderSettlementSyncService
                     ]);
                     return $market;
                 }
-                \Log::warning('fetchResolvedMarket: Gamma API 返回空数组', [
+                \Log::warning('fetchResolvedMarket: Gamma API 返回数据但不匹配', [
                     'order_id' => $order->id,
                     'market_id' => $gammaMarketId,
+                    'market_condition_id' => $market['conditionId'] ?? null,
+                    'expected_condition_id' => $conditionId,
                 ]);
             } catch (Throwable $e) {
                 \Log::warning('fetchResolvedMarket: Gamma API 失败', [
