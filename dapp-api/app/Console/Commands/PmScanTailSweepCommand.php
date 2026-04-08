@@ -219,8 +219,9 @@ class PmScanTailSweepCommand extends Command
             // 价格时间限制配置：优先使用任务自定义配置，否则使用默认配置
             $taskConfig = is_array($task->tail_price_time_config) ? $task->tail_price_time_config : [];
             $defaultConfig = [
-                'btc/usd' => [200 => 180, 100 => 120, 50 => 80, 40 => 60, 35 => 50, 30 => 30],
-                'eth/usd' => [200 => 180, 100 => 120, 30 => 60, 20 => 30],
+                 // 'btc/usd' => [200 => 180, 100 => 120, 50=>80,40 => 60,35 =>50,30=>30],
+                 'btc/usd' => [200 => 180, 100 => 120, 30 => 60, 20 => 30],
+                 'eth/usd' => [200 => 180, 100 => 120, 30 => 60, 20 => 30],
             ];
 
             // 获取当前标的的配置，如果没有配置则跳过
