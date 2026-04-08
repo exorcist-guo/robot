@@ -311,20 +311,23 @@ class PmOrderSettlementSyncService
 
         $marketEndAt = $this->orderMarketEndAt($order, $market);
 
-        // 如果 Polymarket 还没有确定赢家，但市场已经结束超过 5 分钟，尝试备用逻辑
-        $minutesSinceEnd = $marketEndAt ? abs(now()->diffInMinutes($marketEndAt, false)) : 0;
-        if ($winningOutcome === null && $marketEndAt !== null && now()->gte($marketEndAt) && $minutesSinceEnd >= 5) {
-            $fallbackResult = $this->resolveTailSweepFallback($order, $market, $tokens);
-            if ($fallbackResult !== null) {
-                [$winningOutcome, $settlementSource] = $fallbackResult;
-                \Log::info('PmOrderSettlementSync::使用备用结算逻辑', [
-                    'order_id' => $order->id,
-                    'winning_outcome' => $winningOutcome,
-                    'source' => $settlementSource,
-                    'minutes_since_end' => $minutesSinceEnd,
-                ]);
-            }
-        }
+        // 备用结算逻辑已禁用：token 价格可能是过期的中间价格，不能作为最终结果的依据
+        // 只有当 Polymarket 官方通过 UMA 预言机确定 winner 后，才进行结算
+        // 参考：订单560的案例，官网显示 Down 获胜，但 API 返回的是过期价格 Up=0.75
+        //
+        // $minutesSinceEnd = $marketEndAt ? abs(now()->diffInMinutes($marketEndAt, false)) : 0;
+        // if ($winningOutcome === null && $marketEndAt !== null && now()->gte($marketEndAt) && $minutesSinceEnd >= 5) {
+        //     $fallbackResult = $this->resolveTailSweepFallback($order, $market, $tokens);
+        //     if ($fallbackResult !== null) {
+        //         [$winningOutcome, $settlementSource] = $fallbackResult;
+        //         \Log::info('PmOrderSettlementSync::使用备用结算逻辑', [
+        //             'order_id' => $order->id,
+        //             'winning_outcome' => $winningOutcome,
+        //             'source' => $settlementSource,
+        //             'minutes_since_end' => $minutesSinceEnd,
+        //         ]);
+        //     }
+        // }
 
         $isSettled = $winningOutcome !== null && ($marketEndAt === null || now()->gte($marketEndAt));
 
@@ -403,11 +406,11 @@ class PmOrderSettlementSyncService
 
         // 如果某个方向的价格 >= 0.9，认为该方向获胜
         if (bccomp($upPrice, '0.9', 8) >= 0) {
-            return ['Up', 'fallback_price_analysis'];
+            return ['up', 'fallback_price_analysis'];
         }
 
         if (bccomp($downPrice, '0.9', 8) >= 0) {
-            return ['Down', 'fallback_price_analysis'];
+            return ['down', 'fallback_price_analysis'];
         }
 
         // 如果价格差异明显（> 0.3），选择价格更高的一方
@@ -416,9 +419,9 @@ class PmOrderSettlementSyncService
 
         if (bccomp($absPriceDiff, '0.3', 8) > 0) {
             if (bccomp($upPrice, $downPrice, 8) > 0) {
-                return ['Up', 'fallback_price_comparison'];
+                return ['up', 'fallback_price_comparison'];
             } else {
-                return ['Down', 'fallback_price_comparison'];
+                return ['down', 'fallback_price_comparison'];
             }
         }
 

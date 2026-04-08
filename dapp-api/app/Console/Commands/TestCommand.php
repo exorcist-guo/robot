@@ -29,7 +29,7 @@ class TestCommand extends Command
     public function handle(PolymarketTradingService $trading)
     {
 
-        $a = $this->buildCurrentRoundSlugFromString('2026-04-07 18:49:03');
+        $a = $this->buildCurrentRoundSlugFromString('2026-04-08 09:14:33');
         echo $a;
         exit;
         $order = \App\Models\Pm\PmOrder::find(360);

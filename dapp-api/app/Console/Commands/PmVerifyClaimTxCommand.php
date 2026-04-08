@@ -10,10 +10,10 @@ class PmVerifyClaimTxCommand extends Command
 {
     protected $signature = 'pm:verify-claim-tx
                             {--order-id= : 指定订单ID}
-                            {--all-claimed : 验证所有已兑奖但未确认的订单}
+                            {--all-claimed : 验证所有兑奖中/已兑奖但未确认的订单}
                             {--dry-run : 只查看不更新}';
 
-    protected $description = '验证兑奖交易是否已上链并更新状态';
+    protected $description = '验证兑奖交易是否已上链并更新状态（支持 CLAIMING 和 CLAIMED 状态）';
 
     public function handle(PolymarketClaimService $claimService): int
     {
@@ -41,8 +41,9 @@ class PmVerifyClaimTxCommand extends Command
             return 1;
         }
 
-        if ($order->claim_status !== PmOrder::CLAIM_STATUS_CLAIMED) {
-            $this->warn("订单 {$orderId} 不是已兑奖状态 (当前状态: {$order->claim_status})");
+        // 支持验证 CLAIMING 和 CLAIMED 两种状态
+        if (!in_array($order->claim_status, [PmOrder::CLAIM_STATUS_CLAIMING, PmOrder::CLAIM_STATUS_CLAIMED])) {
+            $this->warn("订单 {$orderId} 不需要验证 (当前状态: {$order->claim_status})");
             return 0;
         }
 
@@ -99,13 +100,18 @@ class PmVerifyClaimTxCommand extends Command
 
     private function verifyAll(bool $dryRun, PolymarketClaimService $claimService): int
     {
+        // 同时验证 CLAIMING 和 CLAIMED 两种状态的订单
         $orders = PmOrder::query()
-            ->where('claim_status', PmOrder::CLAIM_STATUS_CLAIMED)
+            ->whereIn('claim_status', [PmOrder::CLAIM_STATUS_CLAIMING, PmOrder::CLAIM_STATUS_CLAIMED])
             ->whereNotNull('claim_tx_hash')
+            ->where('claim_tx_hash', '!=', '')
             ->orderBy('id')
             ->get();
 
-        $this->info("找到 {$orders->count()} 个待验证订单");
+        $claimingCount = $orders->where('claim_status', PmOrder::CLAIM_STATUS_CLAIMING)->count();
+        $claimedCount = $orders->where('claim_status', PmOrder::CLAIM_STATUS_CLAIMED)->count();
+
+        $this->info("找到 {$orders->count()} 个待验证订单 (CLAIMING: {$claimingCount}, CLAIMED: {$claimedCount})");
 
         $confirmed = 0;
         $pending = 0;

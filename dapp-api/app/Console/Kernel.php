@@ -41,6 +41,10 @@ class Kernel extends ConsoleKernel
         ->everyMinute()
         ->withoutOverlapping();
 
+        // 每小时扫描所有钱包并自动领取奖励（1小时以上的订单）
+        $schedule->command('pm:claim-position --scan-all --min-age=3600')
+        ->hourly()
+        ->withoutOverlapping();
 
     }
 
