@@ -845,17 +845,31 @@ class PmOrderSettlementSyncService
     private function fetchResolvedMarket(string $conditionId, PmOrder $order): array
     {
         // 优先使用已有的 settlement_payload 中的市场数据（避免重复API调用）
-        // 但如果市场未解决且订单未结算，则跳过缓存强制刷新
+        // 但只有当市场已解决（umaResolutionStatus=resolved）或有明确的 winner 时才使用缓存
         if (is_array($order->settlement_payload) && isset($order->settlement_payload['market'])) {
             $cachedMarket = $order->settlement_payload['market'];
             if (is_array($cachedMarket) && $cachedMarket !== [] && $this->marketMatchesCondition($cachedMarket, $conditionId)) {
-                // 如果订单未结算且缓存的市场也未解决，跳过缓存强制刷新
                 $cachedResolutionStatus = $cachedMarket['umaResolutionStatus'] ?? null;
-                if (!$order->is_settled && $cachedResolutionStatus !== 'resolved') {
-                    // 跳过缓存，继续执行下面的 API 查询
-                } else {
+                $hasWinner = false;
+
+                // 检查 tokens 中是否有 winner=true
+                if (isset($order->settlement_payload['market_tokens']) && is_array($order->settlement_payload['market_tokens'])) {
+                    foreach ($order->settlement_payload['market_tokens'] as $token) {
+                        if (is_array($token)) {
+                            $winner = $token['winner'] ?? false;
+                            if ($winner === true || $winner === 1 || $winner === '1' || $winner === 'true') {
+                                $hasWinner = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // 只有市场已解决或有明确赢家时才使用缓存
+                if ($cachedResolutionStatus === 'resolved' || $hasWinner) {
                     return $cachedMarket;
                 }
+                // 否则跳过缓存，强制刷新 API 数据
             }
         }
 

@@ -132,6 +132,10 @@ class PmScanTailSweepCommand extends Command
                 'tail_price_time_config',
             ]));
 
+        // 异步预检查：在扫描开始前批量检查所有钱包的授权状态
+        // 这样后续下单时可以直接使用缓存，无需等待 API 调用
+        $this->preCheckWalletReadiness($tasks, $trading);
+
         // 同一轮扫描内按 symbol / token+side 做缓存，避免重复请求外部数据。
         $snapshots = [];
         $books = [];
@@ -589,6 +593,65 @@ class PmScanTailSweepCommand extends Command
             } catch (\Throwable) {
                 // 忽略重建失败
             }
+        }
+    }
+
+    /**
+     * 异步预检查所有钱包的授权状态
+     * 在扫描开始前批量检查，后续下单时直接使用缓存
+     */
+    private function preCheckWalletReadiness($tasks, PolymarketTradingService $trading): void
+    {
+        // 收集所有需要检查的钱包（去重）
+        $walletIds = $tasks->pluck('member_id')->unique()->filter();
+
+        if ($walletIds->isEmpty()) {
+            return;
+        }
+
+        $startTime = microtime(true);
+        $checkedCount = 0;
+        $cachedCount = 0;
+
+        foreach ($walletIds as $memberId) {
+            try {
+                $wallet = \App\Models\Pm\PmCustodyWallet::where('member_id', $memberId)
+                    ->with('member')
+                    ->first();
+
+                if (!$wallet) {
+                    continue;
+                }
+
+                $side = 'BUY'; // 扫尾盘只做买入
+                $cacheKey = 'wallet_readiness:' . $wallet->id . ':' . $side;
+
+                // 检查缓存是否存在
+                if (\Illuminate\Support\Facades\Cache::has($cacheKey)) {
+                    $cachedCount++;
+                    continue;
+                }
+
+                // 调用 API 检查授权状态
+                $readiness = $trading->getTradingReadiness($wallet, $side, null, null, null);
+
+                // 缓存结果5分钟
+                if (($readiness['is_ready'] ?? false) === true) {
+                    \Illuminate\Support\Facades\Cache::put($cacheKey, array_merge($readiness, [
+                        'side' => $side,
+                        'cached_at' => now()->toDateTimeString(),
+                    ]), 300);
+                    $checkedCount++;
+                }
+            } catch (\Throwable $e) {
+                $this->warn("预检查钱包 {$memberId} 失败: {$e->getMessage()}");
+            }
+        }
+
+        $elapsed = round((microtime(true) - $startTime) * 1000, 2);
+
+        if ($checkedCount > 0 || $cachedCount > 0) {
+            $this->info("预检查完成: {$checkedCount} 个新检查, {$cachedCount} 个使用缓存, 耗时 {$elapsed}ms");
         }
     }
 

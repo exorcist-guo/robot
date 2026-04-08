@@ -250,13 +250,32 @@ class PmExecuteOrderIntentJob implements ShouldQueue
             return;
         }
 
-        $readiness = $trading->getTradingReadiness(
-            $wallet,
-            $side,
-            (string) $intent->token_id,
-            $normalizedPrice,
-            $normalizedSize,
-        );
+        // 使用预检查的缓存结果（由扫描命令在开始时批量检查）
+        // 如果缓存不存在，则进行完整检查
+        $cacheKey = 'wallet_readiness:' . $wallet->id . ':' . $side;
+        $cachedReadiness = \Illuminate\Support\Facades\Cache::get($cacheKey);
+
+        if ($cachedReadiness && ($cachedReadiness['is_ready'] ?? false) === true) {
+            // 使用缓存的授权状态（无需 API 调用）
+            $readiness = $cachedReadiness;
+        } else {
+            // 缓存不存在或已过期，进行完整检查
+            $readiness = $trading->getTradingReadiness(
+                $wallet,
+                $side,
+                (string) $intent->token_id,
+                $normalizedPrice,
+                $normalizedSize,
+            );
+
+            // 如果检查通过，缓存结果5分钟
+            if (($readiness['is_ready'] ?? false) === true) {
+                \Illuminate\Support\Facades\Cache::put($cacheKey, array_merge($readiness, [
+                    'side' => $side,
+                    'cached_at' => now()->toDateTimeString(),
+                ]), 300);
+            }
+        }
 
         if (($readiness['is_ready'] ?? false) !== true) {
             $failureCode = (string) ($readiness['failure_code'] ?? 'trade_not_ready');
