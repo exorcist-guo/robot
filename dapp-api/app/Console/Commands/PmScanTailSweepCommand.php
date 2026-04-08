@@ -388,6 +388,8 @@ class PmScanTailSweepCommand extends Command
                     'allow_partial_fill' => (bool) $task->allow_partial_fill,
                     'daily_max_usdc' => $task->daily_max_usdc,
                     'round_key' => $roundKey,
+                    'start_time' => $starTime,
+                    'end_time' => $endTime,
                     'market_slug' => $task->market_slug,
                     'market_id' => $task->market_id,
                     'market_question' => $task->market_question,

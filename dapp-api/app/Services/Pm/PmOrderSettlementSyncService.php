@@ -4,6 +4,7 @@ namespace App\Services\Pm;
 
 use App\Models\Pm\PmCopyTask;
 use App\Models\Pm\PmOrder;
+use App\Models\Pm\PmOrderIntent;
 use Brick\Math\BigDecimal;
 use Brick\Math\RoundingMode;
 use Illuminate\Support\Carbon;
@@ -607,22 +608,10 @@ class PmOrderSettlementSyncService
      */
     private function marketMatchesCondition(array $market, string $conditionId, array $tokens = []): bool
     {
+        // 严格匹配 condition_id，不能因为有 winner 就认为是正确的市场
+        // 否则会导致获取到错误的市场数据（例如订单579获取到了1906714而不是1905508）
         $marketConditionId = strtolower((string) ($market['conditionId'] ?? $market['condition_id'] ?? ''));
-        if ($marketConditionId !== '' && $marketConditionId === $conditionId) {
-            return true;
-        }
-
-        if ($tokens === []) {
-            $tokens = $this->extractMarketTokens($market);
-        }
-
-        foreach ($tokens as $token) {
-            if (is_array($token) && ($token['winner'] ?? false) === true) {
-                return true;
-            }
-        }
-
-        return false;
+        return $marketConditionId !== '' && $marketConditionId === $conditionId;
     }
 
     private function orderMarketEndAt(PmOrder $order, array $market = []): ?Carbon
@@ -797,16 +786,18 @@ class PmOrderSettlementSyncService
         $riskSnapshot = is_array($intent?->risk_snapshot) ? $intent->risk_snapshot : [];
         $request = is_array($order->request_payload) ? $order->request_payload : [];
 
+        // 优先级调整：优先使用下单时的真实数据，而不是缓存的 condition_id
+        // 否则会导致所有订单永久使用第一次同步时保存的 condition_id
         $candidates = [
             $remote['market'] ?? null,
-            $order->settlement_payload['condition_id'] ?? null,
             $order->response_payload['market'] ?? null,
             $request['condition_id'] ?? null,
             $request['request']['input']['condition_id'] ?? null,
-            $task?->market_id,
             $riskSnapshot['market_id'] ?? null,
             $request['market_id'] ?? null,
             $request['request']['input']['market_id'] ?? null,
+            $task?->market_id,
+            $order->settlement_payload['condition_id'] ?? null,  // 缓存放到最后
         ];
 
         foreach ($candidates as $candidate) {
@@ -876,9 +867,25 @@ class PmOrderSettlementSyncService
         try {
             $market = $this->factory->makeReadClient()->clob()->markets()->get($conditionId);
             if (is_array($market) && $market !== [] && $this->marketMatchesCondition($market, $conditionId)) {
+                \Log::info('fetchResolvedMarket: CLOB API 成功', [
+                    'order_id' => $order->id,
+                    'condition_id' => $conditionId,
+                    'market_id' => $market['id'] ?? null,
+                ]);
                 return $market;
             }
-        } catch (Throwable) {
+            \Log::warning('fetchResolvedMarket: CLOB API 返回数据但不匹配', [
+                'order_id' => $order->id,
+                'condition_id' => $conditionId,
+                'market_condition_id' => $market['conditionId'] ?? null,
+            ]);
+        } catch (Throwable $e) {
+            \Log::warning('fetchResolvedMarket: CLOB API 失败', [
+                'order_id' => $order->id,
+                'condition_id' => $conditionId,
+                'error' => $e->getMessage(),
+                'code' => $e->getCode(),
+            ]);
         }
 
         $gammaCandidates = [];
@@ -896,15 +903,120 @@ class PmOrderSettlementSyncService
 
         foreach (array_values(array_unique($gammaCandidates)) as $gammaMarketId) {
             try {
+                \Log::info('fetchResolvedMarket: 尝试 Gamma API', [
+                    'order_id' => $order->id,
+                    'market_id' => $gammaMarketId,
+                ]);
                 $market = $this->gammaMarketById($gammaMarketId);
                 if ($market !== []) {
+                    \Log::info('fetchResolvedMarket: Gamma API 成功', [
+                        'order_id' => $order->id,
+                        'market_id' => $gammaMarketId,
+                        'condition_id' => $market['conditionId'] ?? null,
+                    ]);
                     return $market;
                 }
-            } catch (Throwable) {
+                \Log::warning('fetchResolvedMarket: Gamma API 返回空数组', [
+                    'order_id' => $order->id,
+                    'market_id' => $gammaMarketId,
+                ]);
+            } catch (Throwable $e) {
+                \Log::warning('fetchResolvedMarket: Gamma API 失败', [
+                    'order_id' => $order->id,
+                    'market_id' => $gammaMarketId,
+                    'error' => $e->getMessage(),
+                ]);
             }
         }
 
+        \Log::error('fetchResolvedMarket: 所有 API 都失败', [
+            'order_id' => $order->id,
+            'condition_id' => $conditionId,
+            'gamma_candidates' => $gammaCandidates,
+        ]);
+
+        // 尝试通过 slug 查询（针对 Tail Sweep 订单）
+        $slugMarket = $this->fetchMarketBySlug($order);
+        if ($slugMarket !== []) {
+            \Log::info('fetchResolvedMarket: 通过 slug 成功获取市场数据', [
+                'order_id' => $order->id,
+            ]);
+            return $slugMarket;
+        }
+
         return [];
+    }
+
+    /**
+     * 通过 slug 查询市场（针对 Tail Sweep 订单）
+     *
+     * @return array<string,mixed>
+     */
+    private function fetchMarketBySlug(PmOrder $order): array
+    {
+        try {
+            // 获取订单关联的任务
+            $intent = PmOrderIntent::find($order->order_intent_id);
+            if (!$intent) {
+                return [];
+            }
+
+            $task = PmCopyTask::find($intent->copy_task_id);
+            if (!$task || $task->mode !== PmCopyTask::MODE_TAIL_SWEEP) {
+                return [];
+            }
+
+            // 优先使用 risk_snapshot 中的时间信息
+            $riskSnapshot = $order->risk_snapshot;
+            if (is_array($riskSnapshot) && isset($riskSnapshot['start_time'])) {
+                $startTime = $riskSnapshot['start_time'];
+            } else {
+                // 从订单创建时间推算市场时间（向下取整到5分钟）
+                $orderCreatedAt = $order->created_at->timestamp;
+                $startTime = floor($orderCreatedAt / 300) * 300;
+            }
+
+            // 构造 slug: btc-updown-5m-{start_timestamp}
+            $slug = trim($task->market_slug) . '-' . $startTime;
+
+            \Log::info('fetchMarketBySlug: 尝试查询', [
+                'order_id' => $order->id,
+                'slug' => $slug,
+            ]);
+
+            // 使用 Guzzle HTTP 客户端查询
+            $client = new \GuzzleHttp\Client([
+                'timeout' => 10,
+                'verify' => false,
+            ]);
+
+            $response = $client->get('https://gamma-api.polymarket.com/markets/slug/' . urlencode($slug));
+            $body = $response->getBody()->getContents();
+            $market = json_decode($body, true);
+
+            if (!is_array($market) || empty($market)) {
+                \Log::warning('fetchMarketBySlug: 返回空数据', [
+                    'order_id' => $order->id,
+                    'slug' => $slug,
+                ]);
+                return [];
+            }
+
+            \Log::info('fetchMarketBySlug: 成功', [
+                'order_id' => $order->id,
+                'slug' => $slug,
+                'market_id' => $market['id'] ?? null,
+                'condition_id' => $market['conditionId'] ?? null,
+            ]);
+
+            return $market;
+        } catch (\Throwable $e) {
+            \Log::error('fetchMarketBySlug: 异常', [
+                'order_id' => $order->id,
+                'error' => $e->getMessage(),
+            ]);
+            return [];
+        }
     }
 
     /**
@@ -1024,5 +1136,155 @@ class PmOrderSettlementSyncService
             ->multipliedBy('1000000')
             ->toScale(0, RoundingMode::DOWN)
             ->__toString();
+    }
+
+    /**
+     * 使用 Binance 历史价格判断扫尾盘订单结果（最后的备用方案）
+     *
+     * @return array<string,mixed>|null
+     */
+    private function resolveTailSweepFromBinance(PmOrder $order): ?array
+    {
+        $risk = $order->risk_snapshot;
+        if (!is_array($risk)) {
+            return null;
+        }
+
+        // 只处理扫尾盘订单
+        if (($risk['mode'] ?? null) !== PmCopyTask::MODE_TAIL_SWEEP) {
+            return null;
+        }
+
+        // 必须有时间信息
+        $startTime = $risk['start_time'] ?? null;
+        $endTime = $risk['end_time'] ?? null;
+        if (!$startTime || !$endTime) {
+            \Log::warning('resolveTailSweepFromBinance: 缺少时间信息', [
+                'order_id' => $order->id,
+            ]);
+            return null;
+        }
+
+        // 解析标的（如 BTC/USD）
+        $resolutionSource = $risk['resolution_source'] ?? '';
+        if (!preg_match('/^binance:([A-Z]+)\/([A-Z]+)$/i', $resolutionSource, $matches)) {
+            \Log::warning('resolveTailSweepFromBinance: 不支持的 resolution_source', [
+                'order_id' => $order->id,
+                'resolution_source' => $resolutionSource,
+            ]);
+            return null;
+        }
+
+        $symbol = strtoupper($matches[1] . $matches[2]); // BTCUSD -> BTCUSDT
+        if ($symbol === 'BTCUSD') {
+            $symbol = 'BTCUSDT';
+        }
+
+        try {
+            // 查询开始时间的价格
+            $startPrice = $this->getBinancePrice($symbol, $startTime);
+            if ($startPrice === null) {
+                \Log::warning('resolveTailSweepFromBinance: 无法获取开始价格', [
+                    'order_id' => $order->id,
+                    'symbol' => $symbol,
+                    'start_time' => $startTime,
+                ]);
+                return null;
+            }
+
+            // 查询结束时间的价格
+            $endPrice = $this->getBinancePrice($symbol, $endTime);
+            if ($endPrice === null) {
+                \Log::warning('resolveTailSweepFromBinance: 无法获取结束价格', [
+                    'order_id' => $order->id,
+                    'symbol' => $symbol,
+                    'end_time' => $endTime,
+                ]);
+                return null;
+            }
+
+            // 判断涨跌
+            $priceChange = bcsub($endPrice, $startPrice, 8);
+            $winningOutcome = bccomp($priceChange, '0', 8) > 0 ? 'up' : 'down';
+
+            \Log::info('resolveTailSweepFromBinance: 成功判断结果', [
+                'order_id' => $order->id,
+                'symbol' => $symbol,
+                'start_time' => $startTime,
+                'end_time' => $endTime,
+                'start_price' => $startPrice,
+                'end_price' => $endPrice,
+                'price_change' => $priceChange,
+                'winning_outcome' => $winningOutcome,
+            ]);
+
+            // 构造一个伪市场数据
+            return [
+                'conditionId' => $order->request_payload['condition_id'] ?? $order->response_payload['market'] ?? '',
+                'id' => $risk['market_id'] ?? '',
+                'question' => $risk['market_question'] ?? '',
+                'outcomes' => ['Up', 'Down'],
+                'outcomePrices' => $winningOutcome === 'up' ? ['1', '0'] : ['0', '1'],
+                'umaResolutionStatus' => 'binance_fallback',
+                'tokens' => [
+                    [
+                        'outcome' => 'Up',
+                        'winner' => $winningOutcome === 'up',
+                        'price' => $winningOutcome === 'up' ? 1.0 : 0.0,
+                    ],
+                    [
+                        'outcome' => 'Down',
+                        'winner' => $winningOutcome === 'down',
+                        'price' => $winningOutcome === 'down' ? 1.0 : 0.0,
+                    ],
+                ],
+            ];
+        } catch (\Throwable $e) {
+            \Log::error('resolveTailSweepFromBinance: 异常', [
+                'order_id' => $order->id,
+                'error' => $e->getMessage(),
+            ]);
+            return null;
+        }
+    }
+
+    /**
+     * 从 Binance 获取指定时间的价格
+     */
+    private function getBinancePrice(string $symbol, int $timestamp): ?string
+    {
+        try {
+            // Binance Klines API: 获取1分钟K线数据
+            $url = 'https://api.binance.com/api/v3/klines?' . http_build_query([
+                'symbol' => $symbol,
+                'interval' => '1m',
+                'startTime' => $timestamp * 1000,
+                'endTime' => ($timestamp + 60) * 1000,
+                'limit' => 1,
+            ]);
+
+            $response = @file_get_contents($url);
+            if ($response === false) {
+                return null;
+            }
+
+            $data = json_decode($response, true);
+            if (!is_array($data) || empty($data)) {
+                return null;
+            }
+
+            // K线数据格式: [开盘时间, 开盘价, 最高价, 最低价, 收盘价, ...]
+            $kline = $data[0];
+            $closePrice = $kline[4] ?? null; // 收盘价
+
+            return is_string($closePrice) || is_numeric($closePrice) ? (string) $closePrice : null;
+        } catch (\Throwable $e) {
+            \Log::error('getBinancePrice: 异常', [
+                'symbol' => $symbol,
+                'timestamp' => $timestamp,
+                'error' => $e->getMessage(),
+            ]);
+            return null;
+        }
     }
 }
