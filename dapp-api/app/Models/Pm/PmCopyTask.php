@@ -91,6 +91,7 @@ class PmCopyTask extends Model
 
     public const MODE_LEADER_COPY = 'leader_copy';
     public const MODE_TAIL_SWEEP = 'tail_sweep';
+    public const MODE_TAIL_SWEEP_MANY = 'tail_sweep_many';
 
     protected $table = 'pm_copy_tasks';
 

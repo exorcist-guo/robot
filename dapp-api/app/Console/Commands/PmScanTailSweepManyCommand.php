@@ -98,12 +98,10 @@ class PmScanTailSweepManyCommand extends Command
         PolymarketTradingService $trading
     ): void
     {
-        // 固定本轮扫描时间基准，避免循环内多次 now() 导致边界判断漂移。
         $now = now();
 
-        // 只加载启用中的扫尾盘任务，并裁剪为本轮计算真正需要的字段。
         $tasks = $this->withRedisRetry(fn() => PmCopyTask::query()
-            ->where('mode', PmCopyTask::MODE_TAIL_SWEEP)
+            ->where('mode', PmCopyTask::MODE_TAIL_SWEEP_MANY)
             ->where('status', 1)
             ->get([
                 'id',
@@ -132,11 +130,8 @@ class PmScanTailSweepManyCommand extends Command
                 'tail_price_time_config',
             ]));
 
-        // 异步预检查：在扫描开始前批量检查所有钱包的授权状态
-        // 这样后续下单时可以直接使用缓存，无需等待 API 调用
         $this->preCheckWalletReadiness($tasks, $trading);
 
-        // 同一轮扫描内按 symbol / token+side 做缓存，避免重复请求外部数据。
         $snapshots = [];
         $books = [];
 
@@ -181,10 +176,8 @@ class PmScanTailSweepManyCommand extends Command
                 continue;
             }
 
-            // 距离市场结束的剩余秒数，后续所有尾盘判断都基于这个值。
             $remainingSeconds = $now->diffInSeconds($marketEndAt, false);
             if ($remainingSeconds <= 0) {
-                // 本轮已经结束时，清空本轮起始值与触发标记，便于下一轮重新开始。
                 if ($task->tail_round_started_value !== null || $task->tail_last_triggered_round_key !== null) {
                     $task->tail_round_started_value = null;
                     $task->tail_last_triggered_round_key = null;
@@ -193,7 +186,6 @@ class PmScanTailSweepManyCommand extends Command
                 continue;
             }
 
-            // 达到累计亏损停单阈值后，自动暂停任务并记录停单时间。
             if ($task->tail_loss_stop_count > 0 && $task->tail_loss_count >= $task->tail_loss_stop_count) {
                 if ($task->status !== 0 || $task->tail_loss_stopped_at === null) {
                     $task->status = 0;
@@ -203,7 +195,6 @@ class PmScanTailSweepManyCommand extends Command
                 continue;
             }
 
-            // 默认标的是 btc/usd；同一 symbol 在本轮扫描内只读取一次共享缓存。
             $symbol = $priceCache->normalizeSymbol((string) ($task->market_symbol ?: 'btc/usd'));
             if (!array_key_exists($symbol, $snapshots)) {
                 $snapshot = $priceCache->getSnapshot($symbol);
@@ -220,155 +211,202 @@ class PmScanTailSweepManyCommand extends Command
                 continue;
             }
 
-            // 价格时间限制配置：优先使用任务自定义配置，否则使用默认配置
-            $taskConfig = is_array($task->tail_price_time_config) ? $task->tail_price_time_config : [];
-            $defaultConfig = [
-                 // 'btc/usd' => [200 => 180, 100 => 120, 50=>80,40 => 60,35 =>50,30=>30],
-                 'btc/usd' => [200 => 180, 100 => 120, 30 => 60],
-                 'eth/usd' => [200 => 180, 100 => 120, 30 => 60],
-            ];
-
-            // 获取当前标的的配置，如果没有配置则跳过
-            $symbolConfig = $taskConfig[$symbol] ?? $defaultConfig[$symbol] ?? null;
-            if (!$symbolConfig) {
-                $this->warn("标的 {$symbol} 没有配置价格-时间阈值，跳过");
-                continue;
-            }
-
-            // currentPrice 是实时价格
             $currentPrice = (string) ($snapshot['value'] ?? '0');
             if (!preg_match('/^\d+(\.\d+)?$/', $currentPrice)) {
                 continue;
             }
 
-            // 以 end_at 时间戳作为轮次 key，同一轮只允许触发一次
             $roundKey = (string) $marketEndAt->timestamp;
-
-            // 本轮已经触发过则直接跳过，避免重复下单
-            if ($task->tail_last_triggered_round_key === $roundKey) {
-                continue;
-            }
-
             $startPrice = $this->getStartPrice($starTime, $endTime, $symbol);
-
-            // 变化量 = 当前价格 - 本轮开始价格
             $change = bcsub($currentPrice, $startPrice, 8);
-            $absChange = bcmul($change, $change[0] === '-' ? '-1' : '1', 8); // 取绝对值
+            $absChange = bcmul($change, $change[0] === '-' ? '-1' : '1', 8);
 
-            // $this->info("Task {$task->id}: remainingSeconds={$remainingSeconds}, currentPrice={$currentPrice}, startPrice={$startPrice}, change={$change}, absChange={$absChange}");
+            // 多单模式规则定义（硬编码）
+            // 规则0: 价差 > 15, 时间 < 210s, 下单 20 USDC
+            // 规则1: 价差 > 25, 时间 < 90s, 下单 30 USDC
+            // 规则2: 价差 > 45, 时间 < 15s, 下单 45 USDC
+            // 规则3: 价差 < 15, 时间 12-15s, 反方向下单 10 USDC
+            $rules = [
+                ['price_threshold' => '15', 'time_max' => 210, 'usdc' => 2000000, 'reverse' => false],
+                ['price_threshold' => '25', 'time_max' => 90, 'usdc' => 3000000, 'reverse' => false],
+                ['price_threshold' => '45', 'time_max' => 15, 'usdc' => 4500000, 'reverse' => false],
+                ['price_threshold' => '15', 'time_min' => 12, 'time_max' => 15, 'usdc' => 1000000, 'reverse' => true],
+            ];
 
-            // 遍历价格-时间阈值配置，从大到小检查（已按key降序排列）
-            $triggered = false;
-            $matchedThreshold = null;
-            $matchedTimeLimit = null;
+            // 查询本轮已下单记录
+            $existingIntents = PmOrderIntent::query()
+                ->where('copy_task_id', $task->id)
+                ->where('risk_snapshot->round_key', $roundKey)
+                ->orderBy('id')
+                ->get(['id', 'risk_snapshot']);
 
-            foreach ($symbolConfig as $priceThreshold => $timeLimit) {
-                // 价格变化绝对值 >= 阈值 且 剩余时间 <= 时间限制
-                if (bccomp($absChange, (string)$priceThreshold, 8) >= 0 && $remainingSeconds <= $timeLimit) {
-                    $triggered = true;
-                    $matchedThreshold = $priceThreshold;
-                    $matchedTimeLimit = $timeLimit;
-                    break;
+            $placedRules = [];
+            foreach ($existingIntents as $intent) {
+                $ruleIndex = $intent->risk_snapshot['rule_index'] ?? null;
+                if ($ruleIndex !== null) {
+                    $placedRules[] = $ruleIndex;
                 }
             }
 
-            if (!$triggered) {
-                // $this->info("Task {$task->id}: 未满足任何触发条件，跳过");
-                continue;
+            // 确定第一单的价差方向（正或负）
+            $firstDirection = null;
+            if (!empty($placedRules)) {
+                $firstIntent = $existingIntents->first();
+                $firstChange = $firstIntent->risk_snapshot['change'] ?? null;
+                if ($firstChange !== null) {
+                    $firstDirection = bccomp($firstChange, '0', 8) >= 0 ? 'positive' : 'negative';
+                }
             }
 
-            $this->info("Task {$task->id}: 触发条件满足 - 价格变化={$absChange} >= {$matchedThreshold}, 剩余时间={$remainingSeconds}s <= {$matchedTimeLimit}s");
+            // 当前价差方向
+            $currentDirection = bccomp($change, '0', 8) >= 0 ? 'positive' : 'negative';
 
-            // 根据价格变化方向决定买入方向
-            $side = null;
-            $tokenId = null;
-            $triggerSide = null;
-            if (bccomp($change, '0', 8) > 0) {
-                // 价格上涨：买上涨方向 token
+            // 按顺序检查规则
+            foreach ($rules as $ruleIndex => $rule) {
+                // 已下过此规则，跳过
+                if (in_array($ruleIndex, $placedRules, true)) {
+                    continue;
+                }
+
+                // 必须按顺序下单：如果前面的规则还没下，不能跳过
+                for ($i = 0; $i < $ruleIndex; $i++) {
+                    if (!in_array($i, $placedRules, true)) {
+                        continue 2;
+                    }
+                }
+
+                // 方向一致性检查：第一单确定方向后，后续非反向单必须保持一致
+                if ($firstDirection !== null && !$rule['reverse']) {
+                    if ($currentDirection !== $firstDirection) {
+                        continue;
+                    }
+                }
+
+                // 检查价差条件
+                $priceMatch = false;
+                if ($rule['reverse']) {
+                    // 规则4：价差 < 15
+                    $priceMatch = bccomp($absChange, $rule['price_threshold'], 8) < 0;
+                } else {
+                    // 规则1-3：价差 >= 阈值
+                    $priceMatch = bccomp($absChange, $rule['price_threshold'], 8) >= 0;
+                }
+
+                if (!$priceMatch) {
+                    continue;
+                }
+
+                // 检查时间条件
+                $timeMatch = false;
+                if (isset($rule['time_min']) && isset($rule['time_max'])) {
+                    // 规则4：时间在 12-15 秒之间
+                    $timeMatch = $remainingSeconds >= $rule['time_min'] && $remainingSeconds <= $rule['time_max'];
+                } elseif (isset($rule['time_max'])) {
+                    // 规则1-3：时间 <= 上限
+                    $timeMatch = $remainingSeconds <= $rule['time_max'];
+                }
+
+                if (!$timeMatch) {
+                    continue;
+                }
+
+                // 确定下单方向
                 $side = PolymarketTradingService::SIDE_BUY;
-                $tokenId = (string) $task->token_yes_id;
-                $triggerSide = 'up';
-            } elseif (bccomp($change, '0', 8) < 0) {
-                // 价格下跌：买下跌方向 token
-                $side = PolymarketTradingService::SIDE_BUY;
-                $tokenId = (string) $task->token_no_id;
-                $triggerSide = 'down';
+                $tokenId = null;
+                $triggerSide = null;
+
+                if ($rule['reverse']) {
+                    // 反方向下单
+                    if (bccomp($change, '0', 8) > 0) {
+                        $tokenId = (string) $task->token_no_id;
+                        $triggerSide = 'down';
+                    } elseif (bccomp($change, '0', 8) < 0) {
+                        $tokenId = (string) $task->token_yes_id;
+                        $triggerSide = 'up';
+                    } else {
+                        continue;
+                    }
+                } else {
+                    // 正方向下单
+                    if (bccomp($change, '0', 8) > 0) {
+                        $tokenId = (string) $task->token_yes_id;
+                        $triggerSide = 'up';
+                    } elseif (bccomp($change, '0', 8) < 0) {
+                        $tokenId = (string) $task->token_no_id;
+                        $triggerSide = 'down';
+                    } else {
+                        continue;
+                    }
+                }
+
+                if (!$tokenId || !$triggerSide) {
+                    continue;
+                }
+
+                if (!$trading->isTokenTradable($tokenId)) {
+                    $this->warn("任务 {$task->id} token 不可交易: {$tokenId}");
+                    continue;
+                }
+
+                [$entryPrice, $entryPriceSource] = $this->resolveEntryPrice($trading, $tokenId, $side, (string) $rule['usdc'], $books);
+                if (!preg_match('/^\d+(\.\d+)?$/', $entryPrice) || bccomp($entryPrice, '0', 8) <= 0) {
+                    continue;
+                }
+
+                // 创建下单意图
+                $intent = PmOrderIntent::create([
+                    'copy_task_id' => $task->id,
+                    'leader_trade_id' => null,
+                    'member_id' => $task->member_id,
+                    'token_id' => $tokenId,
+                    'side' => $side,
+                    'leader_price' => $entryPrice,
+                    'target_usdc' => (int) $rule['usdc'],
+                    'clamped_usdc' => (int) $rule['usdc'],
+                    'status' => PmOrderIntent::STATUS_PENDING,
+                    'skip_reason' => null,
+                    'risk_snapshot' => [
+                        'mode' => PmCopyTask::MODE_TAIL_SWEEP_MANY,
+                        'max_slippage_bps' => $task->max_slippage_bps,
+                        'allow_partial_fill' => (bool) $task->allow_partial_fill,
+                        'daily_max_usdc' => $task->daily_max_usdc,
+                        'round_key' => $roundKey,
+                        'start_time' => $starTime,
+                        'end_time' => $endTime,
+                        'market_slug' => $task->market_slug,
+                        'market_id' => $task->market_id,
+                        'market_question' => $task->market_question,
+                        'resolution_source' => $task->resolution_source,
+                        'trigger_side' => $triggerSide,
+                        'trigger_amount' => $rule['price_threshold'],
+                        'current_price' => $currentPrice,
+                        'round_start_price' => $startPrice,
+                        'price_to_beat' => (string) ($task->price_to_beat ?: '0'),
+                        'change' => $change,
+                        'remaining_seconds' => $remainingSeconds,
+                        'token_yes_id' => $task->token_yes_id,
+                        'token_no_id' => $task->token_no_id,
+                        'entry_price' => $entryPrice,
+                        'entry_price_source' => $entryPriceSource,
+                        'rule_index' => $ruleIndex,
+                        'rule_reverse' => $rule['reverse'],
+                    ],
+                    'price_time_limit' => "rule{$ruleIndex}-{$rule['price_threshold']}-{$rule['time_max']}",
+                ]);
+
+                PmExecuteOrderIntentJob::dispatch($intent->id);
+                $intent->refresh();
+                $order = $intent->order()->latest('id')->first();
+                $this->info("任务 {$task->id} 规则{$ruleIndex} 触发 - 价差={$absChange}, 剩余={$remainingSeconds}s, 金额=".($rule['usdc']/1000000)." USDC, Intent: {$intent->id}, Order: ".($order?->id ?? 'N/A'));
+
+                // 记录已下单规则
+                $placedRules[] = $ruleIndex;
+
+                // 如果是第一单，记录方向
+                if ($firstDirection === null) {
+                    $firstDirection = $currentDirection;
+                }
             }
-
-            if (!$side || !$triggerSide || $tokenId === '') {
-                $this->warn("Task {$task->id}: 无法确定交易方向，跳过");
-                continue;
-            }
-
-            if (!$trading->isTokenTradable($tokenId)) {
-                $this->warn("任务 {$task->id} token 不可交易: {$tokenId}");
-                continue;
-            }
-
-            // 根据目标金额查询订单簿市场价，不使用 WebSocket 缓存。
-            [$entryPrice, $entryPriceSource] = $this->resolveEntryPrice($trading, $tokenId, $side, (string) $task->tail_order_usdc, $books);
-            if (!preg_match('/^\d+(\.\d+)?$/', $entryPrice) || bccomp($entryPrice, '0', 8) <= 0) {
-                continue;
-            }
-
-            // 同一任务同一轮若已有 pending 意图，则不再重复创建。
-            $existingIntent = PmOrderIntent::query()
-                ->where('copy_task_id', $task->id)
-                ->where('status', PmOrderIntent::STATUS_PENDING)
-                ->where('risk_snapshot->round_key', $roundKey)
-                ->first();
-            if ($existingIntent) {
-                continue;
-            }
-
-            // 创建待执行下单意图，并把本轮触发上下文完整写入 risk_snapshot。
-            $intent = PmOrderIntent::create([
-                'copy_task_id' => $task->id,
-                'leader_trade_id' => null,
-                'member_id' => $task->member_id,
-                'token_id' => $tokenId,
-                'side' => $side,
-                'leader_price' => $entryPrice,
-                'target_usdc' => (int) $task->tail_order_usdc,
-                'clamped_usdc' => (int) $task->tail_order_usdc,
-                'status' => PmOrderIntent::STATUS_PENDING,
-                'skip_reason' => null,
-                'risk_snapshot' => [
-                    'mode' => PmCopyTask::MODE_TAIL_SWEEP,
-                    'max_slippage_bps' => $task->max_slippage_bps,
-                    'allow_partial_fill' => (bool) $task->allow_partial_fill,
-                    'daily_max_usdc' => $task->daily_max_usdc,
-                    'round_key' => $roundKey,
-                    'start_time' => $starTime,
-                    'end_time' => $endTime,
-                    'market_slug' => $task->market_slug,
-                    'market_id' => $task->market_id,
-                    'market_question' => $task->market_question,
-                    'resolution_source' => $task->resolution_source,
-                    'trigger_side' => $triggerSide,
-                    'trigger_amount' => $matchedThreshold,
-                    'current_price' => $currentPrice,
-                    'round_start_price' => $startPrice,
-                    'price_to_beat' => (string) ($task->price_to_beat ?: '0'),
-                    'change' => $change,
-                    'remaining_seconds' => $remainingSeconds,
-                    'token_yes_id' => $task->token_yes_id,
-                    'token_no_id' => $task->token_no_id,
-                    'entry_price' => $entryPrice,
-                    'entry_price_source' => $entryPriceSource,
-                ],
-                'price_time_limit' => "{$matchedThreshold}-{$matchedTimeLimit}",
-            ]);
-
-            // 标记当前轮次已触发，防止本轮再次生成意图。
-            $task->tail_last_triggered_round_key = $roundKey;
-            $task->save();
-
-            // 交给统一下单执行任务同步处理，便于调试和立即获取结果。
-            PmExecuteOrderIntentJob::dispatch($intent->id);
-            $intent->refresh();
-            $order = $intent->order()->latest('id')->first();
-            $this->info("任务 {$task->id} 已触发扫尾盘下单 - Intent: {$intent->id}, Order: ".($order?->id ?? 'N/A').", Status: ".($order ? (int) $order->status : 'N/A'));
         }
     }
 
@@ -457,7 +495,7 @@ class PmScanTailSweepManyCommand extends Command
 
     private function daemonLockKey(): string
     {
-        return 'pm:tail_sweep:scan:run';
+        return 'pm:tail_sweep_many:scan:run';
     }
 
     private function cacheStore(): \Illuminate\Contracts\Cache\Repository
@@ -603,9 +641,9 @@ class PmScanTailSweepManyCommand extends Command
 
         $elapsed = round((microtime(true) - $startTime) * 1000, 2);
 
-        if ($checkedCount > 0 || $cachedCount > 0) {
-            $this->info("预检查完成: {$checkedCount} 个新检查, {$cachedCount} 个使用缓存, 耗时 {$elapsed}ms");
-        }
+        // if ($checkedCount > 0 || $cachedCount > 0) {
+        //     $this->info("预检查完成: {$checkedCount} 个新检查, {$cachedCount} 个使用缓存, 耗时 {$elapsed}ms");
+        // }
     }
 
     /**

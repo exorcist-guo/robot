@@ -101,7 +101,7 @@ class CopyTaskController extends Controller
         $member = $this->currentMember($request);
         $mode = (string) $request->input('mode', PmCopyTask::MODE_LEADER_COPY);
 
-        if ($mode === PmCopyTask::MODE_TAIL_SWEEP) {
+        if ($mode === PmCopyTask::MODE_TAIL_SWEEP || $mode === PmCopyTask::MODE_TAIL_SWEEP_MANY) {
             return $this->storeTailSweep($request, $member);
         }
 
@@ -116,7 +116,7 @@ class CopyTaskController extends Controller
             return $this->error('任务不存在');
         }
 
-        if ($task->mode === PmCopyTask::MODE_TAIL_SWEEP) {
+        if ($task->mode === PmCopyTask::MODE_TAIL_SWEEP || $task->mode === PmCopyTask::MODE_TAIL_SWEEP_MANY) {
             return $this->updateTailSweep($request, $task);
         }
 
@@ -239,6 +239,7 @@ class CopyTaskController extends Controller
 
     private function storeTailSweep(Request $request, PmMember $member)
     {
+        $mode = (string) $request->input('mode', PmCopyTask::MODE_TAIL_SWEEP);
         $marketSlug = trim((string) $request->input('market_slug', ''));
         // 保留完整的 slug（包含时间戳），每次创建新任务
         // $marketSlug = preg_replace('/-\d{10}$/', '', $marketSlug) ?: $marketSlug;
@@ -269,7 +270,7 @@ class CopyTaskController extends Controller
         }
 
         $payload = array_merge($this->normalizeCommonRiskFieldsForCreate($request, true), [
-            'mode' => PmCopyTask::MODE_TAIL_SWEEP,
+            'mode' => $mode,
             'leader_id' => null,
             'status' => 1,
             'market_slug' => $marketSlug,

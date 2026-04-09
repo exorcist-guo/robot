@@ -49,8 +49,21 @@ const editForm = reactive({
 })
 
 const isLeaderMode = computed(() => form.mode === 'leader_copy')
+const isTailSweepMode = computed(() => form.mode === 'tail_sweep' || form.mode === 'tail_sweep_many')
 const marketResolved = computed(() => !!form.market_slug && !!form.market_id && !!form.token_yes_id && !!form.token_no_id && !!form.price_to_beat)
 const taskActionLoading = computed(() => savingTask.value || resolvingLeader.value || resolvingMarket.value)
+
+const modeOptions = [
+  { name: 'Leader跟单', value: 'leader_copy' },
+  { name: '扫尾盘(单单)', value: 'tail_sweep' },
+  { name: '扫尾盘(多单)', value: 'tail_sweep_many' }
+]
+
+const showModeSelect = ref(false)
+
+const getModeLabel = (mode: string) => {
+  return modeOptions.find(opt => opt.value === mode)?.name || '选择模式'
+}
 
 watch(() => form.address, () => {
   form.leader_id = 0
@@ -71,7 +84,7 @@ watch(() => form.market_input, () => {
 watch(() => form.mode, (mode) => {
   if (mode === 'leader_copy') {
     form.market_input = ''
-  } else {
+  } else if (mode === 'tail_sweep' || mode === 'tail_sweep_many') {
     form.address = ''
     form.leader_id = 0
   }
@@ -116,7 +129,7 @@ const resolveMarket = async () => {
     form.market_end_at = market.end_at || ''
     form.token_yes_id = market.token_yes_id || ''
     form.token_no_id = market.token_no_id || ''
-    showSuccessToast('市场已解析')
+    showSuccessToast('市场解析成功，可以保存任务了')
   } catch (error: any) {
     showFailToast(error.message || '解析失败')
   } finally {
@@ -160,7 +173,7 @@ const saveTask = async () => {
       }
 
       await http.post('/copy-tasks', {
-        mode: 'tail_sweep',
+        mode: form.mode,
         market_slug: form.market_slug,
         market_id: form.market_id,
         market_question: form.market_question,
@@ -235,7 +248,7 @@ const removeTask = async (task: any) => {
 const openEditDialog = (task: any) => {
   console.log('打开编辑对话框，任务数据:', task)
   editingTask.value = task
-  if (task.mode === 'tail_sweep') {
+  if (task.mode === 'tail_sweep' || task.mode === 'tail_sweep_many') {
     editForm.tail_order_usdc = parseInt(task.tail_order_usdc) || 0
     editForm.tail_trigger_amount = task.tail_trigger_amount || '200'
     editForm.tail_time_limit_seconds = task.tail_time_limit_seconds || 30
@@ -282,7 +295,7 @@ const saveEdit = async () => {
 
   try {
     const payload: any = {}
-    if (editingTask.value.mode === 'tail_sweep') {
+    if (editingTask.value.mode === 'tail_sweep' || editingTask.value.mode === 'tail_sweep_many') {
       payload.tail_order_usdc = editForm.tail_order_usdc
       payload.tail_trigger_amount = editForm.tail_trigger_amount
       payload.tail_time_limit_seconds = editForm.tail_time_limit_seconds
@@ -346,9 +359,9 @@ onMounted(() => {
         <span class="info-chip info-chip--brand">{{ isLeaderMode ? (form.leader_id ? '已解析 leader' : '等待解析') : (marketResolved ? '已解析市场' : '等待解析') }}</span>
       </div>
       <van-cell-group inset>
-        <van-field v-model="form.mode" is-link readonly label="模式" @click="form.mode = form.mode === 'leader_copy' ? 'tail_sweep' : 'leader_copy'">
+        <van-field v-model="form.mode" is-link readonly label="模式" @click="showModeSelect = true">
           <template #input>
-            <span>{{ isLeaderMode ? 'Leader跟单' : '扫尾盘' }}</span>
+            <span>{{ getModeLabel(form.mode) }}</span>
           </template>
         </van-field>
         <template v-if="isLeaderMode">
@@ -435,15 +448,23 @@ onMounted(() => {
         <div v-for="item in store.copyTasks" :key="item.id" class="task-card surface-card">
           <div class="task-card__header">
             <div class="task-card__meta">
-              <div class="task-card__title">{{ item.mode === 'tail_sweep' ? (item.market?.question || item.market?.slug || '扫尾盘任务') : (item.leader?.display_name || item.leader?.proxy_wallet) }}</div>
-              <div class="task-card__address">{{ item.mode === 'tail_sweep' ? (item.market?.slug || '-') : (item.leader?.proxy_wallet || '-') }}</div>
+              <div class="task-card__title">
+                {{ item.mode === 'tail_sweep' || item.mode === 'tail_sweep_many'
+                  ? (item.market?.question || item.market?.slug || '扫尾盘任务')
+                  : (item.leader?.display_name || item.leader?.proxy_wallet) }}
+              </div>
+              <div class="task-card__address">
+                {{ item.mode === 'tail_sweep' || item.mode === 'tail_sweep_many'
+                  ? (item.market?.slug || '-')
+                  : (item.leader?.proxy_wallet || '-') }}
+              </div>
             </div>
             <span class="info-chip" :class="item.status === 1 ? 'info-chip--success' : 'info-chip--warning'">
               {{ item.status === 1 ? '启用' : '暂停' }}
             </span>
           </div>
-          <div class="task-card__detail" v-if="item.mode === 'tail_sweep'">
-            扫尾盘 / 金额={{ item.tail_order_usdc }} / 阈值={{ item.tail_trigger_amount }} / 时间={{ item.tail_time_limit_seconds }}秒 / 已亏损={{ item.tail_loss_count }}/{{ item.tail_loss_stop_count }}
+          <div class="task-card__detail" v-if="item.mode === 'tail_sweep' || item.mode === 'tail_sweep_many'">
+            {{ item.mode === 'tail_sweep_many' ? '扫尾盘(多单)' : '扫尾盘(单单)' }} / 金额={{ item.tail_order_usdc }} / 阈值={{ item.tail_trigger_amount }} / 时间={{ item.tail_time_limit_seconds }}秒 / 已亏损={{ item.tail_loss_count }}/{{ item.tail_loss_stop_count }}
           </div>
           <div class="task-card__detail" v-else>
             跟单 / ratio={{ item.ratio_bps }}, min={{ item.min_usdc }}, max={{ item.max_usdc }}
@@ -483,7 +504,7 @@ onMounted(() => {
 
     <van-dialog v-model:show="showEditDialog" title="编辑任务" show-cancel-button @confirm="saveEdit">
       <van-cell-group inset style="margin: 16px 0;">
-        <template v-if="editingTask?.mode === 'tail_sweep'">
+        <template v-if="editingTask?.mode === 'tail_sweep' || editingTask?.mode === 'tail_sweep_many'">
           <van-field v-model.number="editForm.tail_order_usdc" label="下单金额(USDC)" type="number" />
           <van-field v-model="editForm.tail_trigger_amount" label="触发阈值" />
           <van-field v-model.number="editForm.tail_time_limit_seconds" label="限制时间(秒)" type="number" />
@@ -511,6 +532,8 @@ onMounted(() => {
         </template>
       </van-cell-group>
     </van-dialog>
+
+    <van-action-sheet v-model:show="showModeSelect" :actions="modeOptions" @select="(item: any) => { form.mode = item.value; showModeSelect = false }" />
   </div>
 </template>
 
