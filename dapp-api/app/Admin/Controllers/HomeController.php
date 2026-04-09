@@ -59,12 +59,7 @@ class HomeController extends Controller
         return $content
             ->title('数据统计')
             ->description('实时数据概览')
-            ->row(function (Row $row) use ($totalMembers, $newMembersToday, $totalParticipations, $totalAmount) {
-                $row->column(3, $this->renderCard('总用户数', $totalMembers, 'feather icon-users', 'primary'));
-                $row->column(3, $this->renderCard('今日新增', $newMembersToday, 'feather icon-user-plus', 'success'));
-                $row->column(3, $this->renderCard('总参与数', $totalParticipations, 'feather icon-activity', 'info'));
-                $row->column(3, $this->renderCard('总参与金额', number_format($totalAmount, 2) . ' USDT', 'feather icon-dollar-sign', 'warning'));
-            })
+
             ->row(function (Row $row) use ($totalOrders, $profitOrders, $lossOrders, $todayOrders, $todayProfitOrders, $todayLossOrders, $todayWinRate) {
                 $row->column(3, $this->renderCard('总订单数', $totalOrders, 'feather icon-file-text', 'primary'));
                 $row->column(3, $this->renderCard('盈利订单', $profitOrders, 'feather icon-trending-up', 'success'));

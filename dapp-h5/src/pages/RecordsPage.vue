@@ -10,7 +10,6 @@ const store = useAppStore()
 const records = computed(() => store.recordsList || [])
 const loading = computed(() => store.recordsLoading)
 const finished = computed(() => store.recordsFinished)
-const statsByTrigger = computed(() => store.recordsStatsByTrigger || [])
 
 const hasDisplayValue = (value: unknown) => value !== null && value !== undefined && value !== ''
 
@@ -22,17 +21,6 @@ const formatFilledUsdc = (value: unknown) => {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })
-}
-
-const formatSignedUsdcShort = (value: unknown) => {
-  if (!hasDisplayValue(value)) return '$0.00'
-  const amount = Number(value)
-  if (Number.isNaN(amount)) return '$0.00'
-  const text = (amount / 1_000_000).toLocaleString('zh-CN', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })
-  return amount > 0 ? `+$${text}` : `-$${Math.abs(amount / 1_000_000).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
 const formatSignedUsdc = (value: unknown) => {
