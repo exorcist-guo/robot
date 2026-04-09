@@ -946,6 +946,15 @@ class PmOrderSettlementSyncService
             return $slugMarket;
         }
 
+        // 最后的备用方案：从 risk_snapshot 构建基本市场对象
+        $fallbackMarket = $this->buildFallbackMarketFromSnapshot($order, $conditionId);
+        if ($fallbackMarket !== []) {
+            \Log::info('fetchResolvedMarket: 使用 risk_snapshot 构建市场数据', [
+                'order_id' => $order->id,
+            ]);
+            return $fallbackMarket;
+        }
+
         return [];
     }
 
@@ -964,22 +973,30 @@ class PmOrderSettlementSyncService
             }
 
             $task = PmCopyTask::find($intent->copy_task_id);
-            if (!$task || $task->mode !== PmCopyTask::MODE_TAIL_SWEEP) {
+            if (!$task || !in_array($task->mode, [PmCopyTask::MODE_TAIL_SWEEP, PmCopyTask::MODE_TAIL_SWEEP_MANY], true)) {
                 return [];
             }
 
-            // 优先使用 risk_snapshot 中的时间信息
-            $riskSnapshot = $order->risk_snapshot;
-            if (is_array($riskSnapshot) && isset($riskSnapshot['start_time'])) {
-                $startTime = $riskSnapshot['start_time'];
+            // 优先使用 intent 的 risk_snapshot 中的下单时市场信息
+            $riskSnapshot = is_array($intent->risk_snapshot) ? $intent->risk_snapshot : [];
+
+            if (isset($riskSnapshot['start_time']) && is_numeric($riskSnapshot['start_time'])) {
+                $startTime = (int) $riskSnapshot['start_time'];
             } else {
                 // 从订单创建时间推算市场时间（向下取整到5分钟）
                 $orderCreatedAt = $order->created_at->timestamp;
-                $startTime = floor($orderCreatedAt / 300) * 300;
+                $startTime = (int) (floor($orderCreatedAt / 300) * 300);
+            }
+
+            // 优先使用下单时快照里的 market_slug，并去掉尾部时间戳后重新拼接
+            $baseSlug = trim((string) ($riskSnapshot['market_slug'] ?? $task->market_slug ?? ''));
+            $baseSlug = (string) (preg_replace('/-\d{10}$/', '', $baseSlug) ?: $baseSlug);
+            if ($baseSlug === '') {
+                return [];
             }
 
             // 构造 slug: btc-updown-5m-{start_timestamp}
-            $slug = trim($task->market_slug) . '-' . $startTime;
+            $slug = $baseSlug . '-' . $startTime;
 
             \Log::info('fetchMarketBySlug: 尝试查询', [
                 'order_id' => $order->id,
@@ -1014,6 +1031,74 @@ class PmOrderSettlementSyncService
             return $market;
         } catch (\Throwable $e) {
             \Log::error('fetchMarketBySlug: 异常', [
+                'order_id' => $order->id,
+                'error' => $e->getMessage(),
+            ]);
+            return [];
+        }
+    }
+
+    /**
+     * 从 risk_snapshot 构建基本市场对象（最后的备用方案）
+     *
+     * @return array<string,mixed>
+     */
+    private function buildFallbackMarketFromSnapshot(PmOrder $order, string $conditionId): array
+    {
+        try {
+            $intent = $order->intent;
+            if (!$intent) {
+                return [];
+            }
+
+            $riskSnapshot = is_array($intent->risk_snapshot) ? $intent->risk_snapshot : [];
+            $requestPayload = is_array($order->request_payload) ? $order->request_payload : [];
+
+            // 从 risk_snapshot 或 request_payload 获取信息
+            $tokenYesId = $riskSnapshot['token_yes_id'] ?? null;
+            $tokenNoId = $riskSnapshot['token_no_id'] ?? null;
+            $marketId = $riskSnapshot['market_id'] ?? $requestPayload['market_id'] ?? null;
+            $marketQuestion = $riskSnapshot['market_question'] ?? null;
+            $marketSlug = $riskSnapshot['market_slug'] ?? null;
+
+            if (!$tokenYesId || !$tokenNoId) {
+                \Log::warning('buildFallbackMarketFromSnapshot: 缺少 token IDs', [
+                    'order_id' => $order->id,
+                ]);
+                return [];
+            }
+
+            // 构建基本的市场对象
+            $market = [
+                'id' => $marketId,
+                'conditionId' => $conditionId,
+                'question' => $marketQuestion,
+                'slug' => $marketSlug,
+                'tokens' => [
+                    [
+                        'token_id' => $tokenYesId,
+                        'outcome' => 'Yes',
+                        'winner' => false,
+                    ],
+                    [
+                        'token_id' => $tokenNoId,
+                        'outcome' => 'No',
+                        'winner' => false,
+                    ],
+                ],
+                'umaResolutionStatus' => null,
+                '_fallback_source' => 'risk_snapshot',
+            ];
+
+            \Log::info('buildFallbackMarketFromSnapshot: 成功构建市场对象', [
+                'order_id' => $order->id,
+                'market_id' => $marketId,
+                'condition_id' => $conditionId,
+            ]);
+
+            return $market;
+        } catch (\Throwable $e) {
+            \Log::error('buildFallbackMarketFromSnapshot: 异常', [
                 'order_id' => $order->id,
                 'error' => $e->getMessage(),
             ]);

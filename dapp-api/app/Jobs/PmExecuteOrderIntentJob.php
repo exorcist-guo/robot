@@ -443,6 +443,10 @@ class PmExecuteOrderIntentJob implements ShouldQueue
             $remoteStatus = $this->mapRemoteStatus($result['response'] ?? []);
             $filledUsdc = $this->resolveFilledUsdc($side, $normalizedNotional->__toString(), $result['response'] ?? []);
 
+            // 构建初始 settlement_payload，包含 condition_id
+            $conditionId = $result['response']['market'] ?? null;
+            $settlementPayload = $conditionId ? ['condition_id' => $conditionId] : null;
+
             $savedOrder = PmOrder::updateOrCreate(
                 ['order_intent_id' => $intent->id],
                 [
@@ -455,6 +459,7 @@ class PmExecuteOrderIntentJob implements ShouldQueue
                     'filled_usdc' => $filledUsdc,
                     'avg_price' => $normalizedPrice,
                     'exchange_nonce' => (string) ($result['request']['payload']['order']['nonce'] ?? '0'),
+                    'settlement_payload' => $settlementPayload,
                     'failure_category' => null,
                     'is_retryable' => false,
                     'retry_count' => 0,
