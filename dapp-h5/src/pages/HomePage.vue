@@ -51,6 +51,10 @@ const openRecords = () => {
   router.push('/records')
 }
 
+const openTriggerStats = () => {
+  router.push('/trigger-stats')
+}
+
 onMounted(async () => {
   await Promise.all([
     store.fetchHome().catch(() => null),
@@ -104,7 +108,10 @@ onMounted(async () => {
     <section>
       <div class="section-header">
         <h2 class="section-title">最近记录</h2>
-        <van-button size="small" plain type="primary" @click="openRecords">查看更多</van-button>
+        <div class="header-actions">
+          <van-button size="small" plain type="success" @click="openTriggerStats">触发条件</van-button>
+          <van-button size="small" plain type="primary" @click="openRecords">查看更多</van-button>
+        </div>
       </div>
       <van-cell-group v-if="store.home?.recent_orders?.length" inset>
         <van-cell
@@ -168,5 +175,10 @@ onMounted(async () => {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 12px;
+}
+
+.header-actions {
+  display: flex;
+  gap: 8px;
 }
 </style>

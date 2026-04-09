@@ -10,8 +10,30 @@ const store = useAppStore()
 const records = computed(() => store.recordsList || [])
 const loading = computed(() => store.recordsLoading)
 const finished = computed(() => store.recordsFinished)
+const statsByTrigger = computed(() => store.recordsStatsByTrigger || [])
 
 const hasDisplayValue = (value: unknown) => value !== null && value !== undefined && value !== ''
+
+const formatUsdc = (value: unknown) => {
+  if (!hasDisplayValue(value)) return '0.00'
+  const amount = Number(value)
+  if (Number.isNaN(amount)) return '0.00'
+  return (amount / 1_000_000).toLocaleString('zh-CN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })
+}
+
+const formatSignedUsdcShort = (value: unknown) => {
+  if (!hasDisplayValue(value)) return '$0.00'
+  const amount = Number(value)
+  if (Number.isNaN(amount)) return '$0.00'
+  const text = (amount / 1_000_000).toLocaleString('zh-CN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })
+  return amount > 0 ? `+$${text}` : `-$${Math.abs(amount / 1_000_000).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
 
 const formatFilledUsdc = (value: unknown) => {
   if (!hasDisplayValue(value)) return '0.00'
@@ -41,11 +63,40 @@ const formatBps = (value: unknown) => {
   return `${(amount / 100).toFixed(2)}%`
 }
 
+const formatDateTime = (value: unknown) => {
+  if (!hasDisplayValue(value)) return '-'
+  try {
+    const date = new Date(value as string)
+    if (Number.isNaN(date.getTime())) return '-'
+    return date.toLocaleString('zh-CN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    })
+  } catch {
+    return '-'
+  }
+}
+
 const formatRecordLabel = (item: any) => {
   const lines = [
     `方向：${item.direction_text || item.direction || '-'}`,
     `状态：${item.settlement_view_text || item.status_text || '-'}`,
   ]
+
+  // 添加下单时间
+  if (item.submitted_at) {
+    lines.push(`下单时间：${formatDateTime(item.submitted_at)}`)
+  }
+
+  // 添加触发条件
+  if (item.intent?.price_time_limit) {
+    lines.push(`触发条件：${item.intent.price_time_limit}`)
+  }
 
   if (item.is_settled === true) {
     lines.push(`胜出方向：${item.winning_outcome || '-'}`)
@@ -66,12 +117,21 @@ const loadRecords = async (reset = false) => {
   }
 }
 
+const loadStats = async () => {
+  try {
+    await store.fetchRecordsStatsByTrigger()
+  } catch (error: any) {
+    showFailToast(error.message || '加载统计失败')
+  }
+}
+
 const openDetail = (id: number | string) => {
   router.push(`/records/${id}`)
 }
 
 onMounted(() => {
   loadRecords(true)
+  loadStats()
 })
 </script>
 
@@ -82,6 +142,39 @@ onMounted(() => {
       <h1 class="page-title">记录列表</h1>
       <p class="page-description">查看订单记录，并在上滑时自动加载更多历史记录。</p>
     </section>
+
+    <!-- 触发条件统计模块 -->
+    <div v-if="statsByTrigger.length" class="stats-section">
+      <h2 class="stats-title">触发条件统计</h2>
+      <van-cell-group inset>
+        <van-cell
+          v-for="stat in statsByTrigger"
+          :key="stat.trigger_condition"
+          class="stat-cell"
+        >
+          <template #title>
+            <div class="stat-header">{{ stat.trigger_condition }}</div>
+          </template>
+          <template #label>
+            <div class="stat-details">
+              <div class="stat-row">
+                <span>总订单：{{ stat.total_orders }}</span>
+                <span>盈利：{{ stat.profit_orders }}</span>
+                <span>亏损：{{ stat.loss_orders }}</span>
+              </div>
+              <div class="stat-row">
+                <span class="pnl-amount" :class="{ 'positive': Number(stat.total_pnl_usdc) > 0, 'negative': Number(stat.total_pnl_usdc) < 0 }">
+                  盈亏：{{ formatSignedUsdcShort(stat.total_pnl_usdc) }}
+                </span>
+                <span class="win-rate" :class="{ 'high-rate': stat.win_rate >= 60, 'low-rate': stat.win_rate < 40 }">
+                  胜率：{{ stat.win_rate }}%
+                </span>
+              </div>
+            </div>
+          </template>
+        </van-cell>
+      </van-cell-group>
+    </div>
 
     <van-list :loading="loading" :finished="finished" finished-text="没有更多记录了" @load="loadRecords(false)">
       <van-cell-group v-if="records.length" inset>
@@ -115,5 +208,65 @@ onMounted(() => {
 
 .record-cell :deep(.van-cell__label) {
   white-space: pre-line;
+}
+
+.stats-section {
+  margin-bottom: 16px;
+}
+
+.stats-title {
+  font-size: 16px;
+  font-weight: 600;
+  padding: 12px 16px 8px;
+  margin: 0;
+  color: var(--van-text-color);
+}
+
+.stat-cell {
+  padding: 12px 16px;
+}
+
+.stat-header {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--van-text-color);
+  margin-bottom: 8px;
+}
+
+.stat-details {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stat-row {
+  display: flex;
+  gap: 16px;
+  font-size: 13px;
+  color: var(--van-text-color-2);
+}
+
+.win-rate {
+  font-weight: 600;
+}
+
+.pnl-amount {
+  font-weight: 600;
+}
+
+.pnl-amount.positive {
+  color: #07c160;
+}
+
+.pnl-amount.negative {
+  color: #ee0a24;
+}
+
+.high-rate {
+  color: #07c160;
+}
+
+.low-rate {
+  color: #ee0a24;
 }
 </style>

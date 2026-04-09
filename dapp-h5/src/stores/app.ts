@@ -16,6 +16,7 @@ export const useAppStore = defineStore('app', {
     recordsLoading: false,
     recordsFinished: false,
     recordDetail: null as any,
+    recordsStatsByTrigger: [] as any[],
   }),
   actions: {
     async fetchHome() {
@@ -108,6 +109,11 @@ export const useAppStore = defineStore('app', {
     },
     resetRecordDetail() {
       this.recordDetail = null
+    },
+    async fetchRecordsStatsByTrigger() {
+      const { data } = await http.get('/me/records-stats/by-trigger')
+      this.recordsStatsByTrigger = data.data?.stats || []
+      return this.recordsStatsByTrigger
     },
   },
 })

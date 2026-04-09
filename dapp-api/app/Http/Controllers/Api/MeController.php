@@ -174,6 +174,10 @@ class MeController extends Controller
                 'size_usdc' => (string) $trade->size_usdc,
                 'traded_at' => $trade->traded_at?->toDateTimeString(),
             ] : null,
+            'intent' => $intent ? [
+                'id' => $intent->id,
+                'price_time_limit' => $intent->price_time_limit,
+            ] : null,
         ];
 
         if ($includePayloads) {
@@ -239,5 +243,60 @@ class MeController extends Controller
         }
 
         return $this->success('ok', $this->transformOrder($order, true));
+    }
+
+    public function recordsStatsByTrigger(Request $request)
+    {
+        $member = $this->currentMember($request);
+
+        // 获取所有已结算的订单（不包含已取消）
+        $orders = $this->baseRecordsQuery($member)
+            ->where('is_settled', true)
+            ->whereHas('intent', fn ($q) => $q->where('status', '!=', 'cancelled'))
+            ->get();
+
+        // 按触发条件分组统计
+        $stats = [];
+        foreach ($orders as $order) {
+            $priceTimeLimit = $order->intent?->price_time_limit ?? '未知';
+
+            if (!isset($stats[$priceTimeLimit])) {
+                $stats[$priceTimeLimit] = [
+                    'trigger_condition' => $priceTimeLimit,
+                    'total_orders' => 0,
+                    'profit_orders' => 0,
+                    'loss_orders' => 0,
+                    'total_pnl_usdc' => '0',
+                    'win_rate' => 0,
+                ];
+            }
+
+            $stats[$priceTimeLimit]['total_orders']++;
+
+            $pnlUsdc = $order->pnl_usdc !== null ? (int) $order->pnl_usdc : 0;
+            $currentTotal = (int) $stats[$priceTimeLimit]['total_pnl_usdc'];
+            $stats[$priceTimeLimit]['total_pnl_usdc'] = (string) ($currentTotal + $pnlUsdc);
+
+            if ($pnlUsdc > 0) {
+                $stats[$priceTimeLimit]['profit_orders']++;
+            } elseif ($pnlUsdc < 0) {
+                $stats[$priceTimeLimit]['loss_orders']++;
+            }
+        }
+
+        // 计算胜率
+        foreach ($stats as $key => $stat) {
+            if ($stat['total_orders'] > 0) {
+                $stats[$key]['win_rate'] = round(($stat['profit_orders'] / $stat['total_orders']) * 100, 2);
+            }
+        }
+
+        // 转换为数组并按总订单数降序排序
+        $result = array_values($stats);
+        usort($result, fn ($a, $b) => $b['total_orders'] <=> $a['total_orders']);
+
+        return $this->success('ok', [
+            'stats' => $result,
+        ]);
     }
 }
