@@ -300,10 +300,10 @@ class PmScanTailSweepCommand extends Command
                 continue;
             }
 
-            // 只有进入最后 N 秒触发窗口后，才继续下单。
-            if ($remainingSeconds > (int) $task->tail_time_limit_seconds) {
-                continue;
-            }
+            // // 只有进入最后 N 秒触发窗口后，才继续下单。
+            // if ($remainingSeconds > (int) $task->tail_time_limit_seconds) {
+            //     continue;
+            // }
 
             // currentPrice 是实时价格；tail_round_started_value 改为本轮开始价格。
             $currentPrice = (string) ($snapshot['value'] ?? '0');
