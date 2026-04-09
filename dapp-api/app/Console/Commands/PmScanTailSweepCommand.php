@@ -300,55 +300,6 @@ class PmScanTailSweepCommand extends Command
                 continue;
             }
 
-            // // 只有进入最后 N 秒触发窗口后，才继续下单。
-            // if ($remainingSeconds > (int) $task->tail_time_limit_seconds) {
-            //     continue;
-            // }
-
-            // currentPrice 是实时价格；tail_round_started_value 改为本轮开始价格。
-            $currentPrice = (string) ($snapshot['value'] ?? '0');
-            if (!preg_match('/^\d+(\.\d+)?$/', $currentPrice)) {
-                continue;
-            }
-
-            // 以 end_at 时间戳作为轮次 key，同一轮只允许触发一次。
-            $roundKey = (string) $marketEndAt->timestamp;
-
-            $startPrice = $this->getStartPrice($starTime, $endTime, $symbol);
-
-            // 变化量 = 当前价格 - 本轮开始价格。
-            $change = bcsub($currentPrice, $startPrice, 8);
-            $threshold = (string) ($task->tail_trigger_amount ?: '0');
-
-            if (!preg_match('/^\d+(\.\d+)?$/', $threshold) || bccomp($threshold, '0', 8) <= 0) {
-                continue;
-            }
-
-            // 本轮已经触发过则直接跳过，避免重复下单。
-            if ($task->tail_last_triggered_round_key === $roundKey) {
-                continue;
-            }
-
-            $side = null;
-            $tokenId = null;
-            $triggerSide = null;
-            if (bccomp($change, $threshold, 8) >= 0) {
-                // 涨幅达到阈值：买上涨方向 token。
-                $side = PolymarketTradingService::SIDE_BUY;
-                $tokenId = (string) $task->token_yes_id;
-                $triggerSide = 'up';
-            } elseif (bccomp($change, bcmul($threshold, '-1', 8), 8) <= 0) {
-                // 跌幅达到阈值：买下跌方向 token。
-                $side = PolymarketTradingService::SIDE_BUY;
-                $tokenId = (string) $task->token_no_id;
-                $triggerSide = 'down';
-            }
-
-            if (!$side || !$triggerSide || $tokenId === '') {
-                // var_dump("任务 {$task->id} 跳过本轮扫描，无触发条件价格差是{$change}限制价差是{$threshold}");
-                continue;
-            }
-
             if (!$trading->isTokenTradable($tokenId)) {
                 $this->warn("任务 {$task->id} token 不可交易: {$tokenId}");
                 continue;
@@ -395,7 +346,7 @@ class PmScanTailSweepCommand extends Command
                     'market_question' => $task->market_question,
                     'resolution_source' => $task->resolution_source,
                     'trigger_side' => $triggerSide,
-                    'trigger_amount' => $threshold,
+                    'trigger_amount' => $matchedThreshold,
                     'current_price' => $currentPrice,
                     'round_start_price' => $startPrice,
                     'price_to_beat' => (string) ($task->price_to_beat ?: '0'),
