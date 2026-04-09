@@ -15,12 +15,12 @@ use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 
-class PmScanTailSweepCommand extends Command
+class PmScanTailSweepManyCommand extends Command
 {
-    // 常驻扫尾盘扫描；--once 仅用于调试，跑一轮后退出。
-    protected $signature = 'pm:scan-tail-sweep {--once : 仅执行一次扫描，便于调试}';
+    // 常驻扫尾盘多单扫描；--once 仅用于调试，跑一轮后退出。
+    protected $signature = 'pm:scan-tail-sweep-many {--once : 仅执行一次扫描，便于调试}';
 
-    protected $description = '常驻扫描扫尾盘任务并在满足条件时生成下单意图';
+    protected $description = '常驻扫描扫尾盘多单任务并在满足条件时生成多个下单意图';
 
     public function handle(
         GammaClient $gammaClient,
@@ -224,7 +224,7 @@ class PmScanTailSweepCommand extends Command
             $taskConfig = is_array($task->tail_price_time_config) ? $task->tail_price_time_config : [];
             $defaultConfig = [
                  // 'btc/usd' => [200 => 180, 100 => 120, 50=>80,40 => 60,35 =>50,30=>30],
-                 'btc/usd' => [200 => 180, 100 => 120, 30 => 60,26=>30],
+                 'btc/usd' => [200 => 180, 100 => 120, 30 => 60],
                  'eth/usd' => [200 => 180, 100 => 120, 30 => 60],
             ];
 
