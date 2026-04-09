@@ -67,7 +67,7 @@ class CopyTaskController extends Controller
                 'max_slippage_bps' => $t->max_slippage_bps,
                 'allow_partial_fill' => (bool) $t->allow_partial_fill,
                 'daily_max_usdc' => $t->daily_max_usdc === null ? null : (string) $t->daily_max_usdc,
-                'tail_order_usdc' => (string) $t->tail_order_usdc,
+                'tail_order_usdc' => $t->tail_order_usdc / 1000000,
                 'tail_trigger_amount' => $t->tail_trigger_amount,
                 'tail_time_limit_seconds' => $t->tail_time_limit_seconds,
                 'tail_loss_stop_count' => $t->tail_loss_stop_count,
@@ -240,13 +240,13 @@ class CopyTaskController extends Controller
     private function storeTailSweep(Request $request, PmMember $member)
     {
         $marketSlug = trim((string) $request->input('market_slug', ''));
-        // 五分钟轮次类市场 slug 末尾通常带一段 Unix 时间戳；保存时去掉尾部时间戳，便于后续自动衔接下一轮。
-        $marketSlug = preg_replace('/-\d{10}$/', '', $marketSlug) ?: $marketSlug;
+        // 保留完整的 slug（包含时间戳），每次创建新任务
+        // $marketSlug = preg_replace('/-\d{10}$/', '', $marketSlug) ?: $marketSlug;
         $marketId = trim((string) $request->input('market_id', ''));
         $tokenYesId = trim((string) $request->input('token_yes_id', ''));
         $tokenNoId = trim((string) $request->input('token_no_id', ''));
         $priceToBeat = trim((string) $request->input('price_to_beat', ''));
-        $tailOrderUsdc = max(0, (int) $request->input('tail_order_usdc', 0));
+        $tailOrderUsdc = max(0, (int) ($request->input('tail_order_usdc', 0) * 1000000));
         $tailTriggerAmount = trim((string) $request->input('tail_trigger_amount', '0'));
         $tailTimeLimitSeconds = max(1, (int) $request->input('tail_time_limit_seconds', 30));
         $tailLossStopCount = max(0, (int) $request->input('tail_loss_stop_count', 0));
@@ -288,28 +288,11 @@ class CopyTaskController extends Controller
             'tail_price_time_config' => is_array($tailPriceTimeConfig) && $tailPriceTimeConfig !== [] ? $tailPriceTimeConfig : null,
         ]);
 
-        $task = PmCopyTask::withTrashed()
-            ->where('member_id', $member->id)
-            ->where('mode', PmCopyTask::MODE_TAIL_SWEEP)
-            ->where('market_slug', $marketSlug)
-            ->first();
-
-        if ($task) {
-            if ($task->trashed()) {
-                $task->restore();
-            }
-            $task->fill($payload);
-            $task->tail_loss_count = 0;
-            $task->tail_round_started_value = null;
-            $task->tail_last_triggered_round_key = null;
-            $task->tail_loss_stopped_at = null;
-            $task->save();
-        } else {
-            $task = PmCopyTask::create([
-                'member_id' => $member->id,
-                ...$payload,
-            ]);
-        }
+        // 直接创建新任务，不复用已有任务
+        $task = PmCopyTask::create([
+            'member_id' => $member->id,
+            ...$payload,
+        ]);
 
         return $this->success('ok', ['id' => $task->id]);
     }
@@ -324,7 +307,7 @@ class CopyTaskController extends Controller
         }
 
         if (isset($fields['tail_order_usdc'])) {
-            $fields['tail_order_usdc'] = max(0, (int) $fields['tail_order_usdc']);
+            $fields['tail_order_usdc'] = max(0, (int) ($fields['tail_order_usdc'] * 1000000));
             if ($fields['tail_order_usdc'] <= 0) {
                 return $this->error('tail_order_usdc 必须大于 0');
             }

@@ -134,37 +134,7 @@ onMounted(() => {
     </section>
 
     <!-- 触发条件统计模块 -->
-    <div v-if="statsByTrigger.length" class="stats-section">
-      <h2 class="stats-title">触发条件统计</h2>
-      <van-cell-group inset>
-        <van-cell
-          v-for="stat in statsByTrigger"
-          :key="stat.trigger_condition"
-          class="stat-cell"
-        >
-          <template #title>
-            <div class="stat-header">{{ stat.trigger_condition }}</div>
-          </template>
-          <template #label>
-            <div class="stat-details">
-              <div class="stat-row">
-                <span>总订单：{{ stat.total_orders }}</span>
-                <span>盈利：{{ stat.profit_orders }}</span>
-                <span>亏损：{{ stat.loss_orders }}</span>
-              </div>
-              <div class="stat-row">
-                <span class="pnl-amount" :class="{ 'positive': Number(stat.total_pnl_usdc) > 0, 'negative': Number(stat.total_pnl_usdc) < 0 }">
-                  盈亏：{{ formatSignedUsdcShort(stat.total_pnl_usdc) }}
-                </span>
-                <span class="win-rate" :class="{ 'high-rate': stat.win_rate >= 60, 'low-rate': stat.win_rate < 40 }">
-                  胜率：{{ stat.win_rate }}%
-                </span>
-              </div>
-            </div>
-          </template>
-        </van-cell>
-      </van-cell-group>
-    </div>
+ 
 
     <van-list :loading="loading" :finished="finished" finished-text="没有更多记录了" @load="loadRecords(false)">
       <van-cell-group v-if="records.length" inset>

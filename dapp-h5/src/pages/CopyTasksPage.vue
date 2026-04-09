@@ -125,11 +125,14 @@ const resolveMarket = async () => {
 }
 
 const saveTask = async () => {
+  if (savingTask.value) return
+
   savingTask.value = true
   try {
     if (isLeaderMode.value) {
       if (!form.leader_id) {
         showFailToast('请先解析 leader')
+        savingTask.value = false
         return
       }
       await http.post('/copy-tasks', {
@@ -142,6 +145,7 @@ const saveTask = async () => {
     } else {
       if (!marketResolved.value) {
         showFailToast('请先解析市场')
+        savingTask.value = false
         return
       }
       // 转换价格-时间配置为后端需要的格式
@@ -357,7 +361,7 @@ onMounted(() => {
           <van-field v-model="form.market_input" label="市场链接/Slug" placeholder="https://polymarket.com/... 或 slug" />
           <van-field v-model="form.market_question" label="市场标题" readonly />
           <van-field v-model="form.price_to_beat" label="Price to beat" readonly />
-          <van-field v-model.number="form.tail_order_usdc" label="下单金额(1e6)" type="number" />
+          <van-field v-model.number="form.tail_order_usdc" label="下单金额(USDC)" type="number" />
           <van-field v-model="form.tail_trigger_amount" label="触发阈值" />
           <van-field v-model.number="form.tail_time_limit_seconds" label="限制时间(秒)" type="number" />
           <van-field v-model.number="form.tail_loss_stop_count" label="亏损停止单数" type="number" />
@@ -480,7 +484,7 @@ onMounted(() => {
     <van-dialog v-model:show="showEditDialog" title="编辑任务" show-cancel-button @confirm="saveEdit">
       <van-cell-group inset style="margin: 16px 0;">
         <template v-if="editingTask?.mode === 'tail_sweep'">
-          <van-field v-model.number="editForm.tail_order_usdc" label="下单金额(1e6)" type="number" />
+          <van-field v-model.number="editForm.tail_order_usdc" label="下单金额(USDC)" type="number" />
           <van-field v-model="editForm.tail_trigger_amount" label="触发阈值" />
           <van-field v-model.number="editForm.tail_time_limit_seconds" label="限制时间(秒)" type="number" />
           <van-field v-model.number="editForm.tail_loss_stop_count" label="亏损停止单数" type="number" />
