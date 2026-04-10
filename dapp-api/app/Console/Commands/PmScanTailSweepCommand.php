@@ -65,7 +65,12 @@ class PmScanTailSweepCommand extends Command
                     // 每轮扫描前重连 Redis，避免连接超时
                     $this->reconnectRedis();
 
-                    $this->scan($gammaClient, $priceCache, $trading);
+                    if ($this->shouldSkipScan(now())) {
+                        $this->line('当前时间在 04:00-12:00 之间，跳过本轮扫尾盘扫描');
+                        sleep(10);
+                    } else {
+                        $this->scan($gammaClient, $priceCache, $trading);
+                    }
                     if ($once) {
                         $this->info('扫尾盘扫描完成');
 
@@ -90,6 +95,13 @@ class PmScanTailSweepCommand extends Command
         } finally {
             optional($lock)->release();
         }
+    }
+
+    private function shouldSkipScan(Carbon $now): bool
+    {
+        $hour = (int) $now->format('G');
+
+        return $hour >= 4 && $hour < 12;
     }
 
     private function scan(
@@ -224,7 +236,7 @@ class PmScanTailSweepCommand extends Command
             $taskConfig = is_array($task->tail_price_time_config) ? $task->tail_price_time_config : [];
             $defaultConfig = [
                  // 'btc/usd' => [200 => 180, 100 => 120, 50=>80,40 => 60,35 =>50,30=>30],
-                 'btc/usd' => [200 => 180, 100 => 120, 35 => 50,26=>30],
+                 'btc/usd' => [200 => 180, 100 => 120, 35 => 40,26=>30],
                  'eth/usd' => [200 => 180, 100 => 120, 30 => 60],
             ];
 
