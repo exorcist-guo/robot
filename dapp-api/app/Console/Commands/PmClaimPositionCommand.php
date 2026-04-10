@@ -62,6 +62,7 @@ class PmClaimPositionCommand extends Command
         try {
             $positionsJson = file_get_contents("https://data-api.polymarket.com/positions?user={$wallet->signer_address}");
             $positions = json_decode($positionsJson, true);
+            //&enum=TITLE&sortDirection=DESC
         } catch (\Exception $e) {
             $this->error("❌ 查询持仓失败: " . $e->getMessage());
             return 1;
@@ -97,9 +98,15 @@ class PmClaimPositionCommand extends Command
                 $status,
                 $pos['title'] ?? 'Unknown'
             ));
-            $this->line("    市场: " . ($pos['market'] ?? 'N/A'));
+            $slug = $pos['slug'] ?? '';
+            if (preg_match('/-(\d+)$/', $slug, $matches)) {
+                $orderTime = (int) $matches[1];
+                $this->line("    订单时间: " . date('Y-m-d H:i:s', $orderTime));
+            }
+
+            // $this->line("    市场: " . ($pos['market'] ?? 'N/A'));
             $this->line("    下注方向: " . ($pos['outcome'] ?? 'N/A'));
-            $this->line("    投入成本: $" . number_format($pos['initialValue'] ?? 0, 2));
+            // $this->line("    投入成本: $" . number_format($pos['initialValue'] ?? 0, 2));
             $this->line("    当前价值: $" . number_format($currentValue, 2));
             $this->line("    盈亏: $" . number_format($pos['cashPnl'] ?? 0, 2) . " (" . number_format($pos['percentPnl'] ?? 0, 2) . "%)");
 
