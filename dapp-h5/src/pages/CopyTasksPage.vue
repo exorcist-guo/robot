@@ -49,7 +49,6 @@ const editForm = reactive({
 })
 
 const isLeaderMode = computed(() => form.mode === 'leader_copy')
-const isTailSweepMode = computed(() => form.mode === 'tail_sweep' || form.mode === 'tail_sweep_many')
 const marketResolved = computed(() => !!form.market_slug && !!form.market_id && !!form.token_yes_id && !!form.token_no_id && !!form.price_to_beat)
 const taskActionLoading = computed(() => savingTask.value || resolvingLeader.value || resolvingMarket.value)
 

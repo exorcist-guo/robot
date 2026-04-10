@@ -428,15 +428,10 @@ class PmClaimPositionCommand extends Command
                 $totalPositions += count($positions);
                 $this->line("找到 " . count($positions) . " 个持仓");
 
-                // 筛选可领取且符合时间条件的持仓
+                // 仅按时间条件筛选持仓
                 $claimablePositions = [];
                 foreach ($positions as $pos) {
                     $currentValue = (float) ($pos['currentValue'] ?? 0);
-                    $isRedeemable = $pos['redeemable'] ?? false;
-
-                    if ($currentValue <= 0 || !$isRedeemable) {
-                        continue;
-                    }
 
                     // 从 slug 中提取时间戳
                     $slug = $pos['slug'] ?? '';
