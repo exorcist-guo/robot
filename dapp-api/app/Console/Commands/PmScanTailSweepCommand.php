@@ -224,7 +224,7 @@ class PmScanTailSweepCommand extends Command
             $taskConfig = is_array($task->tail_price_time_config) ? $task->tail_price_time_config : [];
             $defaultConfig = [
                  // 'btc/usd' => [200 => 180, 100 => 120, 50=>80,40 => 60,35 =>50,30=>30],
-                 'btc/usd' => [200 => 180, 100 => 120, 30 => 60,26=>30],
+                 'btc/usd' => [200 => 180, 100 => 120, 35 => 50,26=>30],
                  'eth/usd' => [200 => 180, 100 => 120, 30 => 60],
             ];
 

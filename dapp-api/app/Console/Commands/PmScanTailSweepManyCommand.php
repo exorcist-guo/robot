@@ -227,9 +227,9 @@ class PmScanTailSweepManyCommand extends Command
             // 规则2: 价差 > 45, 时间 < 15s, 下单 45 USDC
             // 规则3: 价差 < 15, 时间 12-15s, 反方向下单 10 USDC
             $rules = [
-                ['price_threshold' => '15', 'time_max' => 210, 'usdc' => 2000000, 'reverse' => false],
-                ['price_threshold' => '25', 'time_max' => 90, 'usdc' => 3000000, 'reverse' => false],
-                ['price_threshold' => '45', 'time_max' => 15, 'usdc' => 4500000, 'reverse' => false],
+                ['price_threshold' => '50', 'time_max' => 210, 'usdc' => 2000000, 'reverse' => false],
+                ['price_threshold' => '40', 'time_max' => 90, 'usdc' => 3000000, 'reverse' => false],
+                ['price_threshold' => '26', 'time_max' => 15, 'usdc' => 4500000, 'reverse' => false],
                 ['price_threshold' => '15', 'time_min' => 12, 'time_max' => 15, 'usdc' => 1000000, 'reverse' => true],
             ];
 
