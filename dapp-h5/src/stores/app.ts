@@ -110,8 +110,8 @@ export const useAppStore = defineStore('app', {
     resetRecordDetail() {
       this.recordDetail = null
     },
-    async fetchRecordsStatsByTrigger() {
-      const { data } = await http.get('/me/records-stats/by-trigger')
+    async fetchRecordsStatsByTrigger(params?: { start_time?: string; end_time?: string }) {
+      const { data } = await http.get('/me/records-stats/by-trigger', { params })
       this.recordsStatsByTrigger = data.data?.stats || []
       return this.recordsStatsByTrigger
     },

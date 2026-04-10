@@ -249,12 +249,34 @@ class MeController extends Controller
     public function recordsStatsByTrigger(Request $request)
     {
         $member = $this->currentMember($request);
+        $startTime = $request->query('start_time');
+        $endTime = $request->query('end_time');
+
+        try {
+            $startAt = $startTime ? Carbon::parse($startTime) : null;
+            $endAt = $endTime ? Carbon::parse($endTime) : null;
+        } catch (\Throwable $e) {
+            return $this->error('时间格式不正确');
+        }
+
+        if ($startAt && $endAt && $startAt->gt($endAt)) {
+            return $this->error('开始时间不能大于结束时间');
+        }
 
         // 获取所有已结算的订单（不包含已取消）
-        $orders = $this->baseRecordsQuery($member)
+        $query = $this->baseRecordsQuery($member)
             ->where('is_settled', true)
-            ->whereHas('intent', fn ($q) => $q->where('status', '!=', 'cancelled'))
-            ->get();
+            ->whereHas('intent', fn ($q) => $q->where('status', '!=', 'cancelled'));
+
+        if ($startAt) {
+            $query->where('submitted_at', '>=', $startAt);
+        }
+
+        if ($endAt) {
+            $query->where('submitted_at', '<=', $endAt);
+        }
+
+        $orders = $query->get();
 
         // 按触发条件分组统计
         $stats = [];
