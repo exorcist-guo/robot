@@ -6,6 +6,7 @@ use App\Console\Commands\BnbHealthCheckCommand;
 use App\Console\Commands\PmApproveWalletCommand;
 use App\Console\Commands\PmDebugOrderIntentCommand;
 use App\Console\Commands\PmPollLeaderTradesCommand;
+use App\Console\Commands\PmLossOrderAvgPriceCommand;
 use App\Console\Commands\PmMarketInfoDaemonCommand;
 use App\Console\Commands\PmSyncOrderSettlementCommand;
 use App\Console\Commands\PmTailSweepPriceDaemonCommand;
@@ -21,6 +22,7 @@ class Kernel extends ConsoleKernel
         BnbHealthCheckCommand::class,
         PmApproveWalletCommand::class,
         PmDebugOrderIntentCommand::class,
+        PmLossOrderAvgPriceCommand::class,
         PmPollLeaderTradesCommand::class,
         PmMarketInfoDaemonCommand::class,
         PmSyncOrderSettlementCommand::class,
