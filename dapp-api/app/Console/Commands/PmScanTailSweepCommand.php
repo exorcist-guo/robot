@@ -7,8 +7,8 @@ use App\Models\Pm\PmCopyTask;
 use App\Models\Pm\PmOrderIntent;
 use App\Services\Pm\GammaClient;
 use App\Services\Pm\PolymarketTradingService;
+use App\Services\Pm\TailSweepMarketDataService;
 use App\Services\Pm\TailSweepPriceCache;
-use GuzzleHttp\Client;
 use Illuminate\Console\Command;
 use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Contracts\Cache\LockTimeoutException;
@@ -25,7 +25,8 @@ class PmScanTailSweepCommand extends Command
     public function handle(
         GammaClient $gammaClient,
         TailSweepPriceCache $priceCache,
-        PolymarketTradingService $trading
+        PolymarketTradingService $trading,
+        TailSweepMarketDataService $marketData
     ): int
     {
         $once = (bool) $this->option('once');
@@ -69,7 +70,7 @@ class PmScanTailSweepCommand extends Command
                     //     $this->line('当前时间在 04:00-12:00 之间，跳过本轮扫尾盘扫描');
                     //     sleep(10);
                     // } else {
-                        $this->scan($gammaClient, $priceCache, $trading);
+                        $this->scan($gammaClient, $priceCache, $trading, $marketData);
                     // }
                     if ($once) {
                         $this->info('扫尾盘扫描完成');
@@ -107,7 +108,8 @@ class PmScanTailSweepCommand extends Command
     private function scan(
         GammaClient $gammaClient,
         TailSweepPriceCache $priceCache,
-        PolymarketTradingService $trading
+        PolymarketTradingService $trading,
+        TailSweepMarketDataService $marketData
     ): void
     {
         // 固定本轮扫描时间基准，避免循环内多次 now() 导致边界判断漂移。
@@ -153,17 +155,17 @@ class PmScanTailSweepCommand extends Command
         $books = [];
 
         foreach ($tasks as $task) {
-            $baseSlug = $this->normalizeBaseSlug((string) $task->market_slug);
+            $baseSlug = $marketData->normalizeBaseSlug((string) $task->market_slug);
+            $starTime = $marketData->getRoundStartTime($now);
+            $endTime = $marketData->getRoundEndTime($now);
             if ($baseSlug !== '') {
-                $currentRoundSlug = $this->buildCurrentRoundSlug($baseSlug, $now);
-                $starTime = $this->starTime($now);
-                $endTime = $starTime + 300;
+                $currentRoundSlug = $marketData->buildCurrentRoundSlug($baseSlug, $now);
                 $market_end_at = date('Y-m-d H:i:s', $endTime);
                 $needsRefresh = !$task->market_end_at || (string) $task->market_end_at->timestamp !== (string) $endTime;
 
                 if ($needsRefresh) {
                     try {
-                        $market = $this->resolveCurrentRoundMarket($gammaClient, $currentRoundSlug);
+                        $market = $marketData->resolveCurrentRoundMarket($gammaClient, $currentRoundSlug);
                     } catch (\Throwable $e) {
                         $this->warn("任务 {$task->id} 刷新当前轮 market 失败: {$e->getMessage()}");
                         continue;
@@ -261,7 +263,7 @@ class PmScanTailSweepCommand extends Command
                 continue;
             }
 
-            $startPrice = $this->getStartPrice($starTime, $endTime, $symbol);
+            $startPrice = $marketData->getStartPrice($starTime, $endTime, $symbol);
 
             // 变化量 = 当前价格 - 本轮开始价格
             $change = bcsub($currentPrice, $startPrice, 8);
@@ -318,7 +320,7 @@ class PmScanTailSweepCommand extends Command
             }
 
             // 根据目标金额查询订单簿市场价，不使用 WebSocket 缓存。
-            [$entryPrice, $entryPriceSource] = $this->resolveEntryPrice($trading, $tokenId, $side, (string) $task->tail_order_usdc, $books);
+            [$entryPrice, $entryPriceSource] = $marketData->resolveEntryPrice($trading, $tokenId, $side, (string) $task->tail_order_usdc, $books);
             if (!preg_match('/^\d+(\.\d+)?$/', $entryPrice) || bccomp($entryPrice, '0', 8) <= 0) {
                 continue;
             }
@@ -384,89 +386,6 @@ class PmScanTailSweepCommand extends Command
         }
     }
 
-    private function buildCurrentRoundSlug(string $baseSlug, Carbon $now): string
-    {
-        $minutes = (int) $now->format('i');
-        $targetMinutes = (int) (floor($minutes / 5) * 5);
-        $timestamp = strtotime($now->format('Y-m-d H:').sprintf('%02d', $targetMinutes).':00');
-
-        return $baseSlug.'-'.$timestamp;
-    }
-
-    private function starTime(Carbon $now): int
-    {
-        $minutes = (int) $now->format('i');
-        $targetMinutes = (int) (floor($minutes / 5) * 5);
-        $timestamp = strtotime($now->format('Y-m-d H:').sprintf('%02d', $targetMinutes).':00');
-
-        return $timestamp;
-    }
-
-    private function normalizeBaseSlug(string $slug): string
-    {
-        $slug = trim($slug);
-        if ($slug === '') {
-            return '';
-        }
-
-        return (string) (preg_replace('/-\d{10}$/', '', $slug) ?: $slug);
-    }
-
-    /**
-     * @return array<string,mixed>
-     */
-    private function resolveCurrentRoundMarket(GammaClient $gammaClient, string $currentRoundSlug): array
-    {
-        $store = $this->cacheStore();
-        $cacheKey = $this->marketCacheKey($currentRoundSlug);
-        $cached = $store->get($cacheKey);
-        if (is_array($cached) && $cached !== []) {
-            return $cached;
-        }
-
-        $market = $gammaClient->resolveTailSweepMarket($currentRoundSlug);
-        if (!is_array($market) || $market === []) {
-            throw new \RuntimeException("当前轮 market 为空: {$currentRoundSlug}");
-        }
-
-        $store->put(
-            $cacheKey,
-            $market,
-            now()->addSeconds(max(60, (int) config('pm.tail_sweep_market_cache_ttl_seconds', 1800)))
-        );
-
-        return $market;
-    }
-
-    private function marketCacheKey(string $currentRoundSlug): string
-    {
-        return 'pm:tail_sweep:market:'.md5($currentRoundSlug);
-    }
-
-    private function resolveEntryPrice(
-        PolymarketTradingService $trading,
-        string $tokenId,
-        string $side,
-        string $targetUsdc,
-        array &$books
-    ): array {
-        $bookKey = $tokenId.'|'.$side.'|'.$targetUsdc;
-        if (!isset($books[$bookKey])) {
-            try {
-                $amount = bcdiv($targetUsdc, '1000000', 6);
-                $books[$bookKey] = $trading->getOrderBookMarketPrice($tokenId, $side, $amount);
-            } catch (\Throwable $e) {
-                if (str_contains($e->getMessage(), 'No orderbook exists for the requested token id')) {
-                    $books[$bookKey] = ['price' => '0', 'book' => []];
-                } else {
-                    throw $e;
-                }
-            }
-        }
-
-        return [(string) ($books[$bookKey]['price'] ?? '0'), 'orderbook_market_price'];
-    }
-
     private function daemonLockKey(): string
     {
         return 'pm:tail_sweep:scan:run';
@@ -477,56 +396,6 @@ class PmScanTailSweepCommand extends Command
         $store = config('pm.tail_sweep_scan_cache_store');
 
         return $store !== null && $store !== '' ? Cache::store($store) : Cache::store();
-    }
-
-    private function getStartPrice(int $starTime, int $endTime, string $symbol): string
-    {
-        $symbol = strtoupper(trim((string) $symbol));
-        if (str_contains($symbol, '/')) {
-            $symbol = strtoupper((string) strstr($symbol, '/', true));
-        }
-        if ($symbol === '') {
-            return '0';
-        }
-
-        $cacheKey = 'pm:tail_sweep:start_price:' . md5($symbol.'|'.$starTime.'|'.$endTime);
-        $cached = Cache::get($cacheKey);
-        if (is_string($cached) && preg_match('/^\d+(\.\d+)?$/', $cached) && bccomp($cached, '0', 8) > 0) {
-            return $cached;
-        }
-
-        $eventStartTime = Carbon::createFromTimestamp((int) $starTime, 'UTC')->format('Y-m-d\TH:i:s\Z');
-        $endDate = Carbon::createFromTimestamp((int) $endTime, 'UTC')->format('Y-m-d\TH:i:s\Z');
-
-        $client = new Client([
-            'timeout' => 15,
-            'headers' => [
-                'Accept' => 'application/json',
-                'User-Agent' => 'Mozilla/5.0',
-            ],
-        ]);
-
-        $res = $client->get('https://polymarket.com/api/crypto/crypto-price', [
-            'query' => [
-                'symbol' => $symbol,
-                'eventStartTime' => $eventStartTime,
-                'variant' => 'fiveminute',
-                'endDate' => $endDate,
-            ],
-        ]);
-
-        $json = json_decode($res->getBody()->getContents(), true);
-        if (!is_array($json)) {
-            return '0';
-        }
-
-        $price = trim((string) ($json['openPrice'] ?? ''));
-        if (preg_match('/^\d+(\.\d+)?$/', $price) && bccomp($price, '0', 8) > 0) {
-            Cache::put($cacheKey, $price, now()->addMinutes(10));
-            return $price;
-        }
-
-        return '0';
     }
 
     /**
