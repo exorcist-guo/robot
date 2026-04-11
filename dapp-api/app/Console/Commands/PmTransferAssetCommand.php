@@ -22,6 +22,7 @@ class PmTransferAssetCommand extends Command
 
     public function handle(PmPrivateKeyResolver $resolver, PolygonRpcService $rpc): int
     {
+        return '错误';
         $wallet = $this->resolveWallet();
         if (!$wallet) {
             return self::FAILURE;
