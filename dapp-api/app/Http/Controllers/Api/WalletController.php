@@ -160,10 +160,11 @@ class WalletController extends Controller
 
         $side = strtoupper((string) $request->input('side', PolymarketTradingService::SIDE_BUY));
         $tokenId = trim((string) $request->input('token_id', ''));
+        $refresh = $request->boolean('refresh');
 
         $allowance = $side === PolymarketTradingService::SIDE_SELL
-            ? $trading->getConditionalAllowanceStatus($wallet, $tokenId)
-            : $trading->getAllowanceStatus($wallet);
+            ? $trading->getConditionalAllowanceStatus($wallet, $tokenId, $refresh)
+            : $trading->getAllowanceStatus($wallet, $refresh);
         $readiness = $trading->getTradingReadiness($wallet, $side, $tokenId !== '' ? $tokenId : null);
 
         return $this->success('ok', [

@@ -12,9 +12,10 @@ const hasWallet = computed(() => !!store.walletStatus?.has_wallet)
 const allowanceInfo = computed(() => store.walletAllowanceStatus?.allowance ?? null)
 const readinessInfo = computed(() => store.walletAllowanceStatus?.readiness ?? null)
 const allowanceItems = computed(() => allowanceInfo.value?.allowances || [])
+const tradingWalletAddress = computed(() => store.walletStatus?.wallet?.funder_address || store.walletStatus?.wallet?.signer_address || '-')
 const allowanceLabel = computed(() => {
   if (!allowanceInfo.value) return '未检测'
-  return allowanceInfo.value.is_approved ? '已授权' : '未授权'
+  return allowanceInfo.value.is_approved ? 'BUY 全量授权已完成' : 'BUY 全量授权未完成'
 })
 const formattedAllowanceBalance = computed(() => {
   const raw = allowanceInfo.value?.balance
@@ -49,7 +50,7 @@ const checkAllowanceStatus = async () => {
   }
   checkingAllowance.value = true
   try {
-    await store.fetchWalletAllowanceStatus()
+    await store.fetchWalletAllowanceStatus({ refresh: 1 })
   } catch (error: any) {
     showFailToast(error.message || '检测授权状态失败')
   } finally {
@@ -104,19 +105,20 @@ const approveWallet = async () => {
     <section class="surface-card section-card">
       <div class="section-header">
         <div>
-          <h2 class="section-title">授权管理</h2>
-          <p class="inline-note">检查当前可用余额与 spender 授权状态，并发起一键授权。</p>
+          <h2 class="section-title">BUY 授权管理</h2>
+          <p class="inline-note">当前页面检查的是托管交易钱包对 USDC.e 的 BUY 授权状态；只有以下 spender 全部已授权时，状态才会显示完成。</p>
         </div>
         <span
           class="info-chip"
-          :class="allowanceLabel === '已授权' ? 'info-chip--success' : allowanceLabel === '未授权' ? 'info-chip--warning' : 'info-chip--brand'"
+          :class="allowanceLabel === 'BUY 全量授权已完成' ? 'info-chip--success' : allowanceLabel === 'BUY 全量授权未完成' ? 'info-chip--warning' : 'info-chip--brand'"
         >
           {{ allowanceLabel }}
         </span>
       </div>
       <van-cell-group inset>
-        <van-cell title="授权状态" :value="allowanceLabel" />
-        <van-cell title="可用余额" :value="formattedAllowanceBalance" />
+        <van-cell title="BUY 授权状态" :value="allowanceLabel" />
+        <van-cell title="检测地址" :label="tradingWalletAddress" class="address-row" />
+        <van-cell title="USDC.e 可用余额" :value="formattedAllowanceBalance" />
         <van-cell title="失败代码" :value="readinessInfo?.failure_code || '-'" />
         <van-cell title="是否就绪" :value="readinessInfo?.is_ready ? '是' : '否'" />
       </van-cell-group>

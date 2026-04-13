@@ -352,26 +352,26 @@ class PolymarketTradingService
         );
     }
 
-    public function getBalanceAllowance(PmCustodyWallet $wallet): array
+    public function getBalanceAllowance(PmCustodyWallet $wallet, bool $refresh = false): array
     {
-        return $this->getAssetAllowanceStatus($wallet, self::ASSET_COLLATERAL);
+        return $this->getAssetAllowanceStatus($wallet, self::ASSET_COLLATERAL, null, $refresh);
     }
 
     /**
      * @return array<string,mixed>
      */
-    public function getAllowanceStatus(PmCustodyWallet $wallet): array
+    public function getAllowanceStatus(PmCustodyWallet $wallet, bool $refresh = false): array
     {
-        return $this->summarizeAllowanceStatus($this->getBalanceAllowance($wallet));
+        return $this->summarizeAllowanceStatus($this->getBalanceAllowance($wallet, $refresh));
     }
 
     /**
      * @return array<string,mixed>
      */
-    public function getConditionalAllowanceStatus(PmCustodyWallet $wallet, string $tokenId): array
+    public function getConditionalAllowanceStatus(PmCustodyWallet $wallet, string $tokenId, bool $refresh = false): array
     {
         return $this->summarizeAllowanceStatus(
-            $this->getAssetAllowanceStatus($wallet, self::ASSET_CONDITIONAL, $tokenId)
+            $this->getAssetAllowanceStatus($wallet, self::ASSET_CONDITIONAL, $tokenId, $refresh)
         );
     }
 
@@ -779,7 +779,7 @@ class PolymarketTradingService
     /**
      * @return array<string,mixed>
      */
-    public function getAssetAllowanceStatus(PmCustodyWallet $wallet, string $assetType, ?string $tokenId = null): array
+    public function getAssetAllowanceStatus(PmCustodyWallet $wallet, string $assetType, ?string $tokenId = null, bool $refresh = false): array
     {
         $credRecord = $wallet->apiCredentials ?: $this->ensureApiCredentials($wallet);
         $creds = $this->decodeApiCredentials($credRecord);
@@ -795,10 +795,51 @@ class PolymarketTradingService
             $params['token_id'] = trim($tokenId);
         }
 
-        return $this->withTransientClobRetry(
+        if ($refresh) {
+            try {
+                $this->withTransientClobRetry(
+                    fn () => $client->clob()->account()->updateBalanceAllowance($params),
+                    '刷新 Polymarket allowance 失败'
+                );
+            } catch (\Throwable $e) {
+                if (!$this->isClobMissingEndpointError($e)) {
+                    throw $e;
+                }
+            }
+        }
+
+        $raw = $this->withTransientClobRetry(
             fn () => $client->clob()->account()->getBalanceAllowance($params),
             '读取 Polymarket allowance 失败'
         );
+
+        if (strtoupper($assetType) !== self::ASSET_COLLATERAL) {
+            return $raw;
+        }
+
+        $rawAllowances = is_array($raw['allowances'] ?? null) ? $raw['allowances'] : [];
+        $hasPositiveAllowance = false;
+        foreach ($rawAllowances as $value) {
+            $value = (string) $value;
+            if ($this->isPositiveDecimal($value) || $this->isPositiveInteger($value)) {
+                $hasPositiveAllowance = true;
+                break;
+            }
+        }
+
+        if ($hasPositiveAllowance) {
+            return $raw;
+        }
+
+        try {
+            $chainAllowances = $this->readCollateralAllowancesFromChain($wallet);
+            if ($chainAllowances !== []) {
+                $raw['allowances'] = $chainAllowances;
+            }
+        } catch (\Throwable) {
+        }
+
+        return $raw;
     }
 
     /**
@@ -896,6 +937,14 @@ class PolymarketTradingService
         }
     }
 
+    private function isClobMissingEndpointError(\Throwable $e): bool
+    {
+        $message = strtolower($e->getMessage());
+
+        return str_contains($message, '404 not found')
+            || str_contains($message, '/update-balance-allowance');
+    }
+
     private function isTransientClobTlsError(\Throwable $e): bool
     {
         $message = strtolower($e->getMessage());
@@ -949,6 +998,33 @@ class PolymarketTradingService
             : bccomp($price, $best, 8) <= 0;
     }
 
+    /**
+     * @return array<string,string>
+     */
+    private function readCollateralAllowancesFromChain(PmCustodyWallet $wallet): array
+    {
+        $rpcUrl = trim((string) config('pm.polygon_rpc_url'));
+        $token = trim((string) config('pm.collateral_token'));
+        $owner = trim((string) $wallet->tradingAddress());
+        if ($rpcUrl === '' || $token === '' || $owner === '') {
+            return [];
+        }
+
+        $allowances = [];
+        foreach ($this->approvalSpenders() as $spender) {
+            $data = '0xdd62ed3e'
+                . $this->padHex($owner)
+                . $this->padHex($spender);
+            $result = $this->rpc($rpcUrl, 'eth_call', [[
+                'to' => $token,
+                'data' => $data,
+            ], 'latest']);
+            $allowances[$spender] = $this->rpcHexToDecimalString($result);
+        }
+
+        return $allowances;
+    }
+
     private function padHex(string $value): string
     {
         return str_pad(Str::lower(ltrim($value, '0x')), 64, '0', STR_PAD_LEFT);
@@ -991,6 +1067,28 @@ class PolymarketTradingService
         }
 
         return (int) hexdec(str_starts_with($value, '0x') ? substr($value, 2) : $value);
+    }
+
+    private function rpcHexToDecimalString(mixed $value): string
+    {
+        if (!is_string($value) || $value === '') {
+            return '0';
+        }
+
+        $hex = strtolower(trim($value));
+        $hex = str_starts_with($hex, '0x') ? substr($hex, 2) : $hex;
+        $hex = ltrim($hex, '0');
+        if ($hex === '') {
+            return '0';
+        }
+
+        $decimal = '0';
+        foreach (str_split($hex) as $char) {
+            $decimal = bcmul($decimal, '16', 0);
+            $decimal = bcadd($decimal, (string) hexdec($char), 0);
+        }
+
+        return $decimal;
     }
 
     private function toRpcHex(int $value): string
