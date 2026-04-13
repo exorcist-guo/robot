@@ -33,7 +33,7 @@ class PolymarketClaimService
 
         if ($conditionId !== null) {
             $calldata = $this->encodeRedeemPositionsCalldata(
-                (string) config('pm.collateral_token'),
+                (string) config('pm.claim_collateral_token', config('pm.collateral_token')),
                 self::ZERO_BYTES32,
                 $conditionId,
                 $indexSets,
@@ -52,7 +52,7 @@ class PolymarketClaimService
             'signature' => 'redeemPositions(address,bytes32,bytes32,uint256[])',
             'selector' => self::REDEEM_POSITIONS_SELECTOR,
             'params' => [
-                'collateralToken' => strtolower((string) config('pm.collateral_token')),
+                'collateralToken' => strtolower((string) config('pm.claim_collateral_token', config('pm.collateral_token'))),
                 'parentCollectionId' => self::ZERO_BYTES32,
                 'conditionId' => $conditionId,
                 'indexSets' => $indexSets,

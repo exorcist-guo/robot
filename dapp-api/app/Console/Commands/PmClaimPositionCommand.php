@@ -83,14 +83,21 @@ class PmClaimPositionCommand extends Command
         foreach ($positions as $index => $pos) {
 
             $currentValue = (float) ($pos['currentValue'] ?? 0);
-            $isClaimable = $currentValue > 0 && ($pos['redeemable'] ?? false);
+            $isRedeemable = (bool) ($pos['redeemable'] ?? false);
+            $hasChainBalance = $this->hasChainTokenBalance($wallet, (string) ($pos['asset'] ?? ''));
+            $isClaimable = $currentValue > 0 && $isRedeemable && $hasChainBalance;
+            $isLaggingRedeemed = $currentValue > 0 && $isRedeemable && !$hasChainBalance;
 
             if ($isClaimable) {
                 $claimablePositions[] = $pos;
                 $totalValue += $currentValue;
             }
 
-            $status = $isClaimable ? '✅ 可领取' : ($currentValue > 0 ? '⏳ 未结算' : '❌ 已输');
+            $status = $isClaimable
+                ? '✅ 可领取'
+                : ($isLaggingRedeemed
+                    ? '☑️ 已兑换(接口延迟)'
+                    : ($currentValue > 0 ? '⏳ 未结算' : '❌ 已输'));
 
             $this->line(sprintf(
                 "[%d] %s %s",
@@ -222,10 +229,10 @@ class PmClaimPositionCommand extends Command
 
         // 2. 准备参数
         $conditionId = strtolower($position['conditionId'] ?? '');
-        $collateralToken = config('pm.collateral_token');
+        $collateralToken = config('pm.claim_collateral_token', config('pm.collateral_token'));
         $ctfContract = config('pm.ctf_contract');
         $parentCollectionId = '0x0000000000000000000000000000000000000000000000000000000000000000';
-        $indexSets = [1, 2];
+        $indexSets = $this->resolveIndexSetsFromPosition($position);
 
         $this->line("合约地址: {$ctfContract}");
         $this->line("Condition ID: {$conditionId}");
@@ -264,8 +271,24 @@ class PmClaimPositionCommand extends Command
         $this->line("Nonce: {$nonce}");
         $this->line("Gas Price: " . number_format($safeGasPrice / 1e9, 2) . " Gwei");
         $this->line("Gas Limit: {$gasLimit}");
+        $this->line("Index Sets: [" . implode(', ', $indexSets) . "]");
 
-        // 6. 签名并发送交易
+        // 6. 发送前先做 eth_call 预检查，避免错误参数直接上链
+        $rawCall = [
+            'from' => $from,
+            'to' => $ctfContract,
+            'value' => '0x0',
+            'data' => $calldata,
+        ];
+
+        try {
+            $this->rpc($rpcUrl, 'eth_call', [$rawCall, 'latest']);
+            $this->line("✅ eth_call 预检查通过");
+        } catch (\Exception $e) {
+            throw new \RuntimeException('eth_call 预检查失败: ' . $e->getMessage());
+        }
+
+        // 7. 签名并发送交易
         $raw = [
             'nonce' => '0x' . dechex($nonce),
             'gasPrice' => $gasPriceHex,
@@ -364,6 +387,84 @@ class PmClaimPositionCommand extends Command
     }
 
     /**
+     * 根据持仓接口返回动态计算 indexSets
+     * 优先使用 outcomeIndex；否则回退到二元市场默认 [1,2]
+     *
+     * @return array<int,int>
+     */
+    private function resolveIndexSetsFromPosition(array $position): array
+    {
+        $outcomeIndex = $position['outcomeIndex'] ?? null;
+        if ($outcomeIndex !== null && is_numeric($outcomeIndex)) {
+            $index = (int) $outcomeIndex;
+            if ($index >= 0 && $index <= 255) {
+                return [1 << $index];
+            }
+        }
+
+        return [1, 2];
+    }
+
+    /**
+     * 检查链上是否仍持有该 CTF token，避免 Polymarket 接口延迟导致误判为“可领取”
+     */
+    private function hasChainTokenBalance(PmCustodyWallet $wallet, string $tokenId): bool
+    {
+        $tokenId = trim($tokenId);
+        if ($tokenId === '' || !preg_match('/^\d+$/', $tokenId)) {
+            return false;
+        }
+
+        $rpcUrl = (string) config('pm.polygon_rpc_url');
+        $ctfContract = (string) config('pm.ctf_contract');
+        if ($rpcUrl === '' || $ctfContract === '') {
+            return true;
+        }
+
+        try {
+            $method = '0x00fdd58e'; // balanceOf(address,uint256)
+            $addressHex = str_pad(substr(strtolower($wallet->signer_address), 2), 64, '0', STR_PAD_LEFT);
+            $tokenHex = str_pad($this->decToHex($tokenId), 64, '0', STR_PAD_LEFT);
+            $data = $method . $addressHex . $tokenHex;
+            $result = $this->rpc($rpcUrl, 'eth_call', [[
+                'to' => strtolower($ctfContract),
+                'data' => $data,
+            ], 'latest']);
+
+            if (!is_string($result)) {
+                return false;
+            }
+
+            $hex = strtolower(ltrim($result, '0x'));
+            if ($hex === '') {
+                return false;
+            }
+
+            return hexdec($hex) > 0;
+        } catch (\Throwable) {
+            // RPC 异常时不阻断领取，回退为接口判定可领取
+            return true;
+        }
+    }
+
+    private function decToHex(string $decimal): string
+    {
+        $decimal = trim($decimal);
+        if ($decimal === '' || $decimal === '0') {
+            return '0';
+        }
+
+        $hex = '';
+        while (bccomp($decimal, '0', 0) > 0) {
+            $mod = (int) bcmod($decimal, '16');
+            $hex = dechex($mod) . $hex;
+            $decimal = bcdiv($decimal, '16', 0);
+        }
+
+        return $hex === '' ? '0' : $hex;
+    }
+
+    /**
      * 扫描所有钱包并自动结算
      */
     private function scanAllWallets(PmPrivateKeyResolver $resolver): int
@@ -428,10 +529,18 @@ class PmClaimPositionCommand extends Command
                 $totalPositions += count($positions);
                 $this->line("找到 " . count($positions) . " 个持仓");
 
-                // 仅按时间条件筛选持仓
+                // 仅按时间条件筛选持仓，并额外校验链上 token 余额，避免接口延迟导致已兑换仍显示可领取
                 $claimablePositions = [];
                 foreach ($positions as $pos) {
                     $currentValue = (float) ($pos['currentValue'] ?? 0);
+                    $isRedeemable = (bool) ($pos['redeemable'] ?? false);
+                    $hasChainBalance = $this->hasChainTokenBalance($wallet, (string) ($pos['asset'] ?? ''));
+
+                    // 已兑换但接口未刷新
+                    if ($currentValue > 0 && $isRedeemable && !$hasChainBalance) {
+                        $this->line("  ☑️ 已兑换(接口延迟): " . ($pos['title'] ?? 'Unknown') . " - $" . number_format($currentValue, 2));
+                        continue;
+                    }
 
                     // 从 slug 中提取时间戳
                     $slug = $pos['slug'] ?? '';
@@ -439,8 +548,8 @@ class PmClaimPositionCommand extends Command
                         $orderTime = (int) $matches[1];
                         $age = $now - $orderTime;
 
-                        // 只处理超过最小年龄的订单
-                        if ($age >= $minAge) {
+                        // 只处理超过最小年龄、且接口可领、且链上仍有 token 余额的持仓
+                        if ($age >= $minAge && $currentValue > 0 && $isRedeemable && $hasChainBalance) {
                             $claimablePositions[] = $pos;
                             $totalValue += $currentValue;
                             $this->line("  ✅ 可领取: " . ($pos['title'] ?? 'Unknown') . " - $" . number_format($currentValue, 2) . " (订单时间: " . date('Y-m-d H:i:s', $orderTime) . ", 年龄: " . round($age / 3600, 1) . "h)");

@@ -68,6 +68,7 @@ return [
     'ctf_contract' => strtolower((string) env('PM_CTF_CONTRACT', '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045')),
     'polygon_rpc_url' => env('PM_POLYGON_RPC_URL', ''),
     'collateral_token' => strtolower((string) env('PM_COLLATERAL_TOKEN', '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359')),
+    'claim_collateral_token' => strtolower((string) env('PM_CLAIM_COLLATERAL_TOKEN', '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174')),
     'maker_fee_rate_bps' => (string) env('PM_MAKER_FEE_RATE_BPS', '0'),
     'taker_fee_rate_bps' => (string) env('PM_TAKER_FEE_RATE_BPS', '1000'),
     'default_fee_rate_bps' => (string) env('PM_DEFAULT_FEE_RATE_BPS', '1000'),
