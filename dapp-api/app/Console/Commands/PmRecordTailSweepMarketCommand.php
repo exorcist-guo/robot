@@ -2,8 +2,8 @@
 
 namespace App\Console\Commands;
 
-use App\Models\Pm\PmCopyTask;
 use App\Models\Pm\PmTailSweepMarketSnapshot;
+use App\Models\Pm\PmTailSweepRoundOpenPrice;
 use App\Services\Pm\GammaClient;
 use App\Services\Pm\PolymarketTradingService;
 use App\Services\Pm\TailSweepMarketDataService;
@@ -16,14 +16,17 @@ use Illuminate\Support\Facades\Cache;
 
 class PmRecordTailSweepMarketCommand extends Command
 {
+    private const BASE_MARKET_SLUGS = [
+        'btc-updown-5m',
+        'btc-updown-15m',
+    ];
+
     protected $signature = 'pm:record-tail-sweep-market
         {--once : 仅执行一次采样，便于调试}
         {--symbol=btc/usd : 默认标的}
-        {--task_id= : 指定扫尾盘任务 ID}
         {--target_usdc=20 : 固定下单金额，单位 USDC}';
 
-    protected $description = '每秒记录 BTC 当前价格、上涨下单价、下跌下单价和当前 5 分钟开盘价';
-
+    protected $description = '每秒记录 BTC 当前价格、5m/15m 上涨下单价、下跌下单价和当前 5 分钟开盘价';
     public function handle(
         GammaClient $gammaClient,
         TailSweepPriceCache $priceCache,
@@ -100,130 +103,104 @@ class PmRecordTailSweepMarketCommand extends Command
     ): void {
         $now = now();
         $snapshotAt = Carbon::createFromTimestamp($now->timestamp);
-        $task = $this->resolveTask();
-        if (!$task) {
-            $this->warn('未找到启用中的扫尾盘任务，跳过本轮记录');
-
-            return;
-        }
-
         $defaultSymbol = $priceCache->normalizeSymbol((string) $this->option('symbol'));
-        $baseSlug = $marketData->normalizeBaseSlug((string) $task->market_slug);
-        if ($baseSlug === '') {
-            $this->warn("任务 {$task->id} 缺少 market_slug，跳过本轮记录");
+        $roundStart = Carbon::createFromTimestamp($marketData->getRoundStartTime($now));
+        $roundEnd = Carbon::createFromTimestamp($marketData->getRoundEndTime($now));
+        $targetUsdc = $this->resolveTargetUsdc();
+        $priceSnapshot = $priceCache->getSnapshot($defaultSymbol);
 
-            return;
-        }
-
-        $roundStart = $marketData->getRoundStartTime($now);
-        $roundEnd = $marketData->getRoundEndTime($now);
-        $currentRoundSlug = $marketData->buildCurrentRoundSlug($baseSlug, $now);
-        $market = $marketData->resolveCurrentRoundMarket($gammaClient, $currentRoundSlug);
-
-        $symbol = $priceCache->normalizeSymbol((string) ($market['symbol'] ?? $task->market_symbol ?: $defaultSymbol));
-        $priceSnapshot = $priceCache->getSnapshot($symbol);
         if (!$priceCache->isFresh($priceSnapshot)) {
-            $this->warn("标的 {$symbol} 缓存行情缺失或已过期，跳过本轮记录");
+            $this->warn("标的 {$defaultSymbol} 缓存行情缺失或已过期，跳过本轮");
 
             return;
         }
 
         $currentPrice = trim((string) ($priceSnapshot['value'] ?? '0'));
         if (!preg_match('/^\d+(\.\d+)?$/', $currentPrice) || bccomp($currentPrice, '0', 8) <= 0) {
-            $this->warn("标的 {$symbol} 当前价格无效，跳过本轮记录");
+            $this->warn("标的 {$defaultSymbol} 当前价格无效，跳过本轮");
 
             return;
         }
 
-        $roundOpenPrice = $marketData->getStartPrice($roundStart, $roundEnd, $symbol);
-        $targetUsdc = $this->resolveTargetUsdc();
-        $books = [];
+        $roundOpenPrice = $this->normalizeNullableDecimal($marketData->getStartPrice($roundStart->timestamp, $roundEnd->timestamp, $defaultSymbol));
+        $snapshotPayload = [
+            'current_price' => $currentPrice,
+            'up_entry_price5m' => null,
+            'down_entry_price5m' => null,
+            'up_entry_price15m' => null,
+            'down_entry_price15m' => null,
+            'target_usdc' => (int) $targetUsdc,
+        ];
 
-        $upEntryPrice = null;
-        $upDepthReached = null;
-        $tokenYesId = (string) ($market['token_yes_id'] ?? $task->token_yes_id ?? '');
-        if ($tokenYesId !== '' && $trading->isTokenTradable($tokenYesId)) {
-            [$upEntryPrice, , $upDepthReached] = $marketData->resolveEntryPrice(
-                $trading,
-                $tokenYesId,
-                PolymarketTradingService::SIDE_BUY,
-                $targetUsdc,
-                $books
-            );
-            if (!is_string($upEntryPrice) || !preg_match('/^\d+(\.\d+)?$/', $upEntryPrice) || bccomp($upEntryPrice, '0', 8) <= 0) {
-                $upEntryPrice = null;
-            }
-        }
+        foreach (self::BASE_MARKET_SLUGS as $baseSlug) {
+            $currentRoundSlug = $marketData->buildCurrentRoundSlug($baseSlug, $now);
 
-        $downEntryPrice = null;
-        $downDepthReached = null;
-        $tokenNoId = (string) ($market['token_no_id'] ?? $task->token_no_id ?? '');
-        if ($tokenNoId !== '' && $trading->isTokenTradable($tokenNoId)) {
-            [$downEntryPrice, , $downDepthReached] = $marketData->resolveEntryPrice(
-                $trading,
-                $tokenNoId,
-                PolymarketTradingService::SIDE_BUY,
-                $targetUsdc,
-                $books
-            );
-            if (!is_string($downEntryPrice) || !preg_match('/^\d+(\.\d+)?$/', $downEntryPrice) || bccomp($downEntryPrice, '0', 8) <= 0) {
-                $downEntryPrice = null;
+            try {
+                $market = $marketData->resolveCurrentRoundMarket($gammaClient, $currentRoundSlug);
+            } catch (\Throwable $e) {
+                $this->warn("{$baseSlug} 当前轮 market 解析失败，跳过: {$e->getMessage()}");
+                continue;
             }
+
+            $books = [];
+            $upEntryPrice = null;
+            $downEntryPrice = null;
+            $tokenYesId = (string) ($market['token_yes_id'] ?? '');
+            $tokenNoId = (string) ($market['token_no_id'] ?? '');
+
+            if ($tokenYesId !== '' && $trading->isTokenTradable($tokenYesId)) {
+                [$upEntryPrice] = $marketData->resolveEntryPrice(
+                    $trading,
+                    $tokenYesId,
+                    PolymarketTradingService::SIDE_BUY,
+                    $targetUsdc,
+                    $books
+                );
+                $upEntryPrice = $this->normalizeNullableDecimal($upEntryPrice);
+            }
+
+            if ($tokenNoId !== '' && $trading->isTokenTradable($tokenNoId)) {
+                [$downEntryPrice] = $marketData->resolveEntryPrice(
+                    $trading,
+                    $tokenNoId,
+                    PolymarketTradingService::SIDE_BUY,
+                    $targetUsdc,
+                    $books
+                );
+                $downEntryPrice = $this->normalizeNullableDecimal($downEntryPrice);
+            }
+
+            if ($baseSlug === 'btc-updown-5m') {
+                $snapshotPayload['up_entry_price5m'] = $upEntryPrice;
+                $snapshotPayload['down_entry_price5m'] = $downEntryPrice;
+            }
+
+            if ($baseSlug === 'btc-updown-15m') {
+                $snapshotPayload['up_entry_price15m'] = $upEntryPrice;
+                $snapshotPayload['down_entry_price15m'] = $downEntryPrice;
+            }
+
+            // $this->info("行情已聚合: {$baseSlug} {$defaultSymbol} price={$currentPrice} up={$upEntryPrice} down={$downEntryPrice} open={$roundOpenPrice}");
         }
 
         PmTailSweepMarketSnapshot::query()->updateOrCreate(
             [
-                'symbol' => $symbol,
+                'symbol' => $defaultSymbol,
                 'snapshot_at' => $snapshotAt,
             ],
-            [
-                'round_start_at' => Carbon::createFromTimestamp($roundStart),
-                'round_end_at' => Carbon::createFromTimestamp($roundEnd),
-                'market_slug' => (string) ($market['slug'] ?? $currentRoundSlug),
-                'market_id' => (string) ($market['market_id'] ?? ''),
-                'token_yes_id' => $tokenYesId !== '' ? $tokenYesId : null,
-                'token_no_id' => $tokenNoId !== '' ? $tokenNoId : null,
-                'current_price' => $currentPrice,
-                'round_open_price' => $this->normalizeNullableDecimal($roundOpenPrice),
-                'up_entry_price' => $upEntryPrice,
-                'down_entry_price' => $downEntryPrice,
-                'target_usdc' => (int) $targetUsdc,
-                'price_source' => 'tail_sweep_price_cache',
-                'open_price_source' => 'polymarket_crypto_price_open',
-                'entry_price_source' => 'orderbook_market_price',
-                'raw' => [
-                    'task_id' => $task->id,
-                    'price_snapshot_timestamp' => $priceSnapshot['timestamp'] ?? null,
-                    'price_snapshot_received_at' => $priceSnapshot['received_at'] ?? null,
-                    'market_question' => $market['question'] ?? null,
-                    'resolution_source' => $market['resolution_source'] ?? null,
-                    'price_to_beat' => $market['price_to_beat'] ?? null,
-                    'up_depth_reached' => $upDepthReached,
-                    'down_depth_reached' => $downDepthReached,
-                ],
-            ]
+            $snapshotPayload
         );
 
-        $this->info("行情已记录: {$symbol} price={$currentPrice} up={$upEntryPrice} down={$downEntryPrice} open={$roundOpenPrice}");
-    }
-
-    private function resolveTask(): ?PmCopyTask
-    {
-        $taskId = $this->option('task_id');
-
-        return PmCopyTask::query()
-            ->where('mode', PmCopyTask::MODE_TAIL_SWEEP)
-            ->where('status', 1)
-            ->when($taskId, fn ($query) => $query->where('id', (int) $taskId))
-            ->whereNotNull('market_slug')
-            ->orderBy('id')
-            ->first([
-                'id',
-                'market_slug',
-                'market_symbol',
-                'token_yes_id',
-                'token_no_id',
-            ]);
+        PmTailSweepRoundOpenPrice::query()->updateOrCreate(
+            [
+                'symbol' => $defaultSymbol,
+                'round_start_at' => $roundStart,
+            ],
+            [
+                'round_end_at' => $roundEnd,
+                'round_open_price' => $roundOpenPrice,
+            ]
+        );
     }
 
     private function resolveTargetUsdc(): string

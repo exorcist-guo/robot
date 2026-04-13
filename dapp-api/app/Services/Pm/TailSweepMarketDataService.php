@@ -20,13 +20,25 @@ class TailSweepMarketDataService
 
     public function buildCurrentRoundSlug(string $baseSlug, Carbon $now): string
     {
-        return $baseSlug.'-'.$this->getRoundStartTime($now);
+        $roundStart = str_contains($baseSlug, '15m')
+            ? $this->getRoundStartTime15($now)
+            : $this->getRoundStartTime($now);
+
+        return $baseSlug.'-'.$roundStart;
     }
 
     public function getRoundStartTime(Carbon $now): int
     {
         $minutes = (int) $now->format('i');
         $targetMinutes = (int) (floor($minutes / 5) * 5);
+
+        return strtotime($now->format('Y-m-d H:').sprintf('%02d', $targetMinutes).':00');
+    }
+
+    public function getRoundStartTime15(Carbon $now): int
+    {
+        $minutes = (int) $now->format('i');
+        $targetMinutes = (int) (floor($minutes / 15) * 15);
 
         return strtotime($now->format('Y-m-d H:').sprintf('%02d', $targetMinutes).':00');
     }
