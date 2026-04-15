@@ -2,10 +2,13 @@
 
 namespace App\Jobs;
 
+use App\Jobs\PmSyncOrderStatusJob;
+use App\Jobs\PmSyncOrderSettlementJob;
 use App\Models\Pm\PmOrder;
 use App\Models\Pm\PmOrderIntent;
+use App\Services\Pm\IntentExecutionPrecheckService;
 use App\Services\Pm\PolymarketTradingService;
-use App\Jobs\PmSyncOrderStatusJob;
+use App\Services\Pm\PurchaseTrackingService;
 use Brick\Math\BigDecimal;
 use Brick\Math\RoundingMode;
 use Illuminate\Bus\Queueable;
@@ -34,8 +37,11 @@ class PmExecuteOrderIntentJob implements ShouldQueue
         return [5, 15, 30];
     }
 
-    public function handle(PolymarketTradingService $trading): void
-    {
+    public function handle(
+        PolymarketTradingService $trading,
+        IntentExecutionPrecheckService $precheckService,
+        PurchaseTrackingService $purchaseTrackingService
+    ): void {
         $lock = Cache::lock('pm:intent:execute:' . $this->intentId, 120);
 
         try {
@@ -45,405 +51,103 @@ class PmExecuteOrderIntentJob implements ShouldQueue
         }
 
         try {
-            $this->runHandle($trading);
+            $this->runHandle($trading, $precheckService, $purchaseTrackingService);
         } finally {
             optional($lock)->release();
         }
     }
 
-    private function runHandle(PolymarketTradingService $trading): void
-    {
+    private function runHandle(
+        PolymarketTradingService $trading,
+        IntentExecutionPrecheckService $precheckService,
+        PurchaseTrackingService $purchaseTrackingService
+    ): void {
         $intent = PmOrderIntent::with(['copyTask', 'member.custodyWallet.apiCredentials', 'leaderTrade'])->find($this->intentId);
         if (!$intent || $intent->status !== PmOrderIntent::STATUS_PENDING) {
             return;
         }
 
         $intent->attempt_count = (int) $intent->attempt_count + 1;
+        $intent->processing_started_at = now();
+        $intent->execution_stage = 'validating';
         $intent->save();
 
-        $riskSnapshot = is_array($intent->risk_snapshot) ? $intent->risk_snapshot : [];
         $copyTask = $intent->copyTask;
         if ($copyTask && $copyTask->mode === \App\Models\Pm\PmCopyTask::MODE_TAIL_SWEEP && $copyTask->status !== 1) {
-            $intent->status = PmOrderIntent::STATUS_SKIPPED;
-            $intent->skip_reason = 'task_paused';
-            $intent->save();
+            $this->markSkipped($intent, 'task_paused', 'task', [
+                'task_id' => $copyTask->id,
+            ]);
             return;
         }
 
         $wallet = $intent->member?->custodyWallet;
         if (!$wallet) {
-            $intent->status = PmOrderIntent::STATUS_FAILED;
-            $intent->skip_reason = 'wallet_not_ready';
-            $intent->save();
+            $this->markFailed($intent, 'wallet_not_ready', 'wallet', []);
             return;
         }
 
-        if (!$intent->token_id) {
-            $intent->status = PmOrderIntent::STATUS_FAILED;
-            $intent->skip_reason = 'missing_token_id';
-            $intent->save();
-            return;
-        }
+        $precheck = $precheckService->evaluate($intent, $wallet, $copyTask);
+        if (($precheck['ok'] ?? false) !== true) {
+            $reason = (string) ($precheck['reason'] ?? 'precheck_failed');
+            $context = is_array($precheck['context'] ?? null) ? $precheck['context'] : [];
+            $category = $this->mapReasonToCategory($reason);
 
-        $contextMarketId = (string) ($intent->leaderTrade?->market_id ?? ($riskSnapshot['market_id'] ?? ''));
-        $contextOutcome = (string) ($intent->leaderTrade?->raw['outcome'] ?? ($riskSnapshot['trigger_side'] ?? ''));
-
-        $cachedBook = null;
-        try {
-            $cachedBook = $trading->getOrderBook((string) $intent->token_id);
-        } catch (\Throwable $e) {
-            $message = $e->getMessage();
-            if (str_contains($message, 'No orderbook exists for the requested token id')) {
-                PmOrder::updateOrCreate(
-                    ['order_intent_id' => $intent->id],
-                    [
-                        'status' => PmOrder::STATUS_ERROR,
-                        'request_payload' => [
-                            'intent_id' => $intent->id,
-                            'member_id' => $intent->member_id,
-                            'copy_task_id' => $intent->copy_task_id,
-                            'leader_trade_id' => $intent->leader_trade_id,
-                            'market_id' => $contextMarketId,
-                            'outcome' => $contextOutcome,
-                            'token_id' => (string) $intent->token_id,
-                        ],
-                        'response_payload' => null,
-                        'error_code' => 'token_not_tradable',
-                        'error_message' => 'token_not_tradable',
-                        'last_sync_at' => now(),
-                    ]
-                );
-
-                $intent->status = PmOrderIntent::STATUS_SKIPPED;
-                $intent->skip_reason = 'token_not_tradable';
-                $intent->save();
-                return;
+            if (in_array($reason, ['trade_not_ready'], true) || str_ends_with($reason, '_balance') || str_contains($reason, 'allowance')) {
+                $this->markFailed($intent, $reason, $category, $context, PmOrder::STATUS_REJECTED, 'validation');
+            } else {
+                $this->markSkipped($intent, $reason, $category, $context);
             }
-
-            throw $e;
-        }
-
-        if (!is_array($cachedBook) || $cachedBook === []) {
-            PmOrder::updateOrCreate(
-                ['order_intent_id' => $intent->id],
-                [
-                    'status' => PmOrder::STATUS_ERROR,
-                    'request_payload' => [
-                        'intent_id' => $intent->id,
-                        'member_id' => $intent->member_id,
-                        'copy_task_id' => $intent->copy_task_id,
-                        'leader_trade_id' => $intent->leader_trade_id,
-                        'market_id' => $contextMarketId,
-                        'outcome' => $contextOutcome,
-                        'token_id' => (string) $intent->token_id,
-                    ],
-                    'response_payload' => null,
-                    'error_code' => 'token_not_tradable',
-                    'error_message' => 'token_not_tradable',
-                    'last_sync_at' => now(),
-                ]
-            );
-
-            $intent->status = PmOrderIntent::STATUS_SKIPPED;
-            $intent->skip_reason = 'token_not_tradable';
-            $intent->save();
             return;
         }
 
-        $leaderPrice = (string) ($intent->leader_price ?: '0');
-        if (bccomp($leaderPrice, '0', 8) <= 0) {
-            $intent->status = PmOrderIntent::STATUS_SKIPPED;
-            $intent->skip_reason = 'invalid_price';
-            $intent->save();
-            return;
-        }
+        $requestPayload = $precheck['request_payload'];
+        $requestContext = $precheck['request_context'];
+        $side = (string) $requestPayload['side'];
+        $normalizedPrice = (string) $precheck['normalized_price'];
+        $normalizedNotional = (string) $precheck['normalized_notional'];
 
-        $side = strtoupper((string) $intent->side);
-        if (!in_array($side, [PolymarketTradingService::SIDE_BUY, PolymarketTradingService::SIDE_SELL], true)) {
-            $intent->status = PmOrderIntent::STATUS_SKIPPED;
-            $intent->skip_reason = 'invalid_side';
-            $intent->save();
-            return;
-        }
-
-        if ((int) $intent->clamped_usdc <= 0) {
-            $intent->status = PmOrderIntent::STATUS_SKIPPED;
-            $intent->skip_reason = 'invalid_clamped_usdc';
-            $intent->save();
-            return;
-        }
-
-        $usdc = BigDecimal::of((string) $intent->clamped_usdc)
-            ->dividedBy('1000000', 6, RoundingMode::DOWN);
-
-        $marketPriceQuote = $trading->getOrderBookMarketPrice(
-            (string) $intent->token_id,
-            $side,
-            $side === PolymarketTradingService::SIDE_BUY ? $usdc->__toString() : '0',
-            null,
-            $cachedBook
+        $intent->decision_payload = array_merge(
+            is_array($intent->decision_payload) ? $intent->decision_payload : [],
+            ['precheck' => $precheck]
         );
-        $executionPrice = (string) ($marketPriceQuote['price'] ?? '0');
-        if (bccomp($executionPrice, '0', 8) <= 0) {
-            $intent->status = PmOrderIntent::STATUS_SKIPPED;
-            $intent->skip_reason = 'missing_best_price';
-            $intent->last_error_code = 'missing_best_price';
-            $intent->last_error_message = 'missing_best_price';
-            $intent->save();
+        $intent->execution_stage = 'submitting';
+        $intent->save();
 
+        if ((bool) config('pm.copy_dry_run', false)) {
             PmOrder::updateOrCreate(
                 ['order_intent_id' => $intent->id],
                 [
                     'status' => PmOrder::STATUS_REJECTED,
-                    'request_payload' => [
-                        'intent_id' => $intent->id,
-                        'member_id' => $intent->member_id,
-                        'copy_task_id' => $intent->copy_task_id,
-                        'leader_trade_id' => $intent->leader_trade_id,
-                        'market_id' => $contextMarketId,
-                        'outcome' => $contextOutcome,
-                        'token_id' => (string) $intent->token_id,
-                        'side' => $side,
-                        'leader_price' => $leaderPrice,
-                        'price_source' => 'orderbook_market_price',
-                        'book' => $marketPriceQuote['book'] ?? [],
-                    ],
-                    'response_payload' => null,
-                    'error_code' => 'missing_best_price',
-                    'error_message' => 'missing_best_price',
-                    'failure_category' => 'validation',
+                    'request_payload' => array_merge($requestContext, ['request' => $requestPayload]),
+                    'response_payload' => ['dry_run' => true],
+                    'error_code' => 'dry_run_enabled',
+                    'error_message' => 'dry_run_enabled',
+                    'failure_category' => 'dry_run',
                     'is_retryable' => false,
-                    'retry_count' => max(0, $intent->attempt_count - 1),
-                    'last_sync_at' => now(),
-                ]
-            );
-            return;
-        }
-
-        $sizeScale = $side === PolymarketTradingService::SIDE_BUY ? 2 : 4;
-        $size = $usdc->dividedBy($executionPrice, $sizeScale, RoundingMode::DOWN);
-        $minOrderSize = isset($marketPriceQuote['min_size']) && preg_match('/^\d+(\.\d+)?$/', (string) $marketPriceQuote['min_size'])
-            ? BigDecimal::of((string) $marketPriceQuote['min_size'])
-            : null;
-        if ($side === PolymarketTradingService::SIDE_BUY && $minOrderSize !== null && $size->isLessThan($minOrderSize)) {
-            $size = $minOrderSize;
-            $usdc = $minOrderSize->multipliedBy($executionPrice)->toScale(6, RoundingMode::UP);
-        }
-
-        if ($size->isLessThanOrEqualTo(BigDecimal::zero())) {
-            $intent->status = PmOrderIntent::STATUS_SKIPPED;
-            $intent->skip_reason = 'invalid_size';
-            $intent->save();
-            return;
-        }
-
-        $normalizedPrice = BigDecimal::of($executionPrice)->toScale(4, RoundingMode::DOWN)->stripTrailingZeros()->__toString();
-        $normalizedSize = $size->stripTrailingZeros()->__toString();
-        $normalizedNotional = BigDecimal::of($normalizedPrice)
-            ->multipliedBy($normalizedSize)
-            ->toScale(6, RoundingMode::DOWN);
-
-        if ($side === PolymarketTradingService::SIDE_BUY && $normalizedNotional->isLessThan(BigDecimal::of('1'))) {
-            $intent->status = PmOrderIntent::STATUS_SKIPPED;
-            $intent->skip_reason = 'below_min_marketable_buy_amount';
-            $intent->save();
-            return;
-        }
-
-        // 使用预检查的缓存结果（由扫描命令在开始时批量检查）
-        // 如果缓存不存在，则进行完整检查
-        $cacheKey = 'wallet_readiness:' . $wallet->id . ':' . $side;
-        $cachedReadiness = \Illuminate\Support\Facades\Cache::get($cacheKey);
-
-        if ($cachedReadiness && ($cachedReadiness['is_ready'] ?? false) === true) {
-            // 使用缓存的授权状态（无需 API 调用）
-            $readiness = $cachedReadiness;
-        } else {
-            // 缓存不存在或已过期，进行完整检查
-            $readiness = $trading->getTradingReadiness(
-                $wallet,
-                $side,
-                (string) $intent->token_id,
-                $normalizedPrice,
-                $normalizedSize,
-            );
-
-            // 如果检查通过，缓存结果5分钟
-            if (($readiness['is_ready'] ?? false) === true) {
-                \Illuminate\Support\Facades\Cache::put($cacheKey, array_merge($readiness, [
-                    'side' => $side,
-                    'cached_at' => now()->toDateTimeString(),
-                ]), 300);
-            }
-        }
-
-        if (($readiness['is_ready'] ?? false) !== true) {
-            $failureCode = (string) ($readiness['failure_code'] ?? 'trade_not_ready');
-            PmOrder::updateOrCreate(
-                ['order_intent_id' => $intent->id],
-                [
-                    'status' => PmOrder::STATUS_REJECTED,
-                    'request_payload' => array_merge($requestContext = array_filter([
-                        'intent_id' => $intent->id,
-                        'member_id' => $intent->member_id,
-                        'copy_task_id' => $intent->copy_task_id,
-                        'leader_trade_id' => $intent->leader_trade_id,
-                        'market_id' => $contextMarketId,
-                        'outcome' => $contextOutcome,
-                        'token_id' => (string) $intent->token_id,
-                        'side' => $side,
-                        'leader_price' => $leaderPrice,
-                        'execution_price' => $executionPrice,
-                        'price_source' => 'orderbook_market_price',
-                        'normalized_price' => $normalizedPrice,
-                        'target_usdc' => (string) $intent->target_usdc,
-                        'clamped_usdc' => (string) $intent->clamped_usdc,
-                        'normalized_size' => $normalizedSize,
-                        'normalized_notional' => $normalizedNotional->__toString(),
-                    ], static fn ($value) => $value !== null), ['readiness' => $readiness]),
-                    'response_payload' => null,
-                    'error_code' => $failureCode,
-                    'error_message' => $failureCode,
-                    'failure_category' => 'validation',
-                    'is_retryable' => false,
-                    'retry_count' => max(0, $intent->attempt_count - 1),
+                    'retry_count' => 0,
                     'last_sync_at' => now(),
                 ]
             );
 
-            $intent->status = PmOrderIntent::STATUS_FAILED;
-            $intent->skip_reason = $failureCode;
-            $intent->last_error_code = $failureCode;
-            $intent->last_error_message = $failureCode;
-            $intent->save();
-            return;
-        }
-
-        $riskSnapshot = is_array($intent->risk_snapshot) ? $intent->risk_snapshot : [];
-        $dailyMaxUsdc = isset($riskSnapshot['daily_max_usdc']) && is_numeric((string) $riskSnapshot['daily_max_usdc'])
-            ? (int) $riskSnapshot['daily_max_usdc']
-            : null;
-        if ($trading->exceedsDailyMaxUsdc((int) $intent->member_id, $dailyMaxUsdc)) {
-            $intent->status = PmOrderIntent::STATUS_SKIPPED;
-            $intent->skip_reason = 'daily_limit_exceeded';
-            $intent->last_error_code = 'daily_limit_exceeded';
-            $intent->last_error_message = 'daily_limit_exceeded';
-            $intent->save();
-
-            PmOrder::updateOrCreate(
-                ['order_intent_id' => $intent->id],
-                [
-                    'status' => PmOrder::STATUS_REJECTED,
-                    'request_payload' => ['risk_snapshot' => $riskSnapshot],
-                    'response_payload' => null,
-                    'error_code' => 'daily_limit_exceeded',
-                    'error_message' => 'daily_limit_exceeded',
-                    'failure_category' => 'risk',
-                    'is_retryable' => false,
-                    'retry_count' => max(0, $intent->attempt_count - 1),
-                    'last_sync_at' => now(),
-                ]
+            $intent->execution_mode = 'dry_run';
+            $intent->execution_stage = 'simulated';
+            $intent->processed_at = now();
+            $intent->decision_payload = array_merge(
+                is_array($intent->decision_payload) ? $intent->decision_payload : [],
+                ['simulation' => ['request_payload' => $requestPayload, 'request_context' => $requestContext]]
             );
-            return;
-        }
-
-        $slippageAnchorPrice = $copyTask && $copyTask->mode === \App\Models\Pm\PmCopyTask::MODE_TAIL_SWEEP
-            ? $executionPrice
-            : $leaderPrice;
-
-        $slippage = $trading->evaluateSlippage(
-            (string) $intent->token_id,
-            $side,
-            $slippageAnchorPrice,
-            (int) ($riskSnapshot['max_slippage_bps'] ?? 0),
-            $usdc->__toString(),
-            $executionPrice,
-        );
-        if (($slippage['passed'] ?? true) !== true) {
+            $intent->skip_reason = 'dry_run_enabled';
+            $intent->skip_category = 'dry_run';
             $intent->status = PmOrderIntent::STATUS_SKIPPED;
-            $intent->skip_reason = 'slippage_exceeded';
-            $intent->last_error_code = 'slippage_exceeded';
-            $intent->last_error_message = 'slippage_exceeded';
             $intent->save();
-
-            PmOrder::updateOrCreate(
-                ['order_intent_id' => $intent->id],
-                [
-                    'status' => PmOrder::STATUS_REJECTED,
-                    'request_payload' => [
-                        'slippage' => $slippage,
-                        'risk_snapshot' => $riskSnapshot,
-                        'leader_price' => $leaderPrice,
-                        'execution_price' => $executionPrice,
-                        'price_source' => 'orderbook_market_price',
-                    ],
-                    'response_payload' => null,
-                    'error_code' => 'slippage_exceeded',
-                    'error_message' => 'slippage_exceeded',
-                    'failure_category' => 'risk',
-                    'is_retryable' => false,
-                    'retry_count' => max(0, $intent->attempt_count - 1),
-                    'last_sync_at' => now(),
-                ]
-            );
             return;
         }
-
-        $requestPayload = [
-            'token_id' => (string) $intent->token_id,
-            'market_id' => $contextMarketId,
-            'outcome' => $contextOutcome,
-            'side' => $side,
-            'price' => $normalizedPrice,
-            'size' => $normalizedSize,
-            'order_type' => (bool) ($riskSnapshot['allow_partial_fill'] ?? true) ? 'GTC' : 'FOK',
-            'defer_exec' => false,
-            'expiration' => '0',
-            'nonce' => '0',
-        ];
-
-        $requestPayload = [
-            'token_id' => (string) $intent->token_id,
-            'market_id' => $contextMarketId,
-            'outcome' => $contextOutcome,
-            'side' => $side,
-            'price' => $normalizedPrice,
-            'size' => $normalizedSize,
-            'order_type' => (bool) ($riskSnapshot['allow_partial_fill'] ?? true) ? 'GTC' : 'FOK',
-            'defer_exec' => false,
-            'expiration' => '0',
-            'nonce' => '0',
-        ];
-
-        $requestContext = array_filter([
-            'intent_id' => $intent->id,
-            'member_id' => $intent->member_id,
-            'copy_task_id' => $intent->copy_task_id,
-            'leader_trade_id' => $intent->leader_trade_id,
-            'market_id' => $contextMarketId,
-            'outcome' => $contextOutcome,
-            'token_id' => (string) $intent->token_id,
-            'side' => $side,
-            'leader_price' => $leaderPrice,
-            'execution_price' => $executionPrice,
-            'price_source' => 'orderbook_market_price',
-            'normalized_price' => $normalizedPrice,
-            'target_usdc' => (string) $intent->target_usdc,
-            'clamped_usdc' => (string) $intent->clamped_usdc,
-            'size' => $size->__toString(),
-            'normalized_size' => $normalizedSize,
-            'normalized_notional' => $normalizedNotional->__toString(),
-            'risk_snapshot' => $riskSnapshot,
-            'slippage' => $slippage,
-        ], static fn ($value) => $value !== null);
 
         try {
             $result = $trading->placeOrder($wallet, $requestPayload);
 
             $remoteStatus = $this->mapRemoteStatus($result['response'] ?? []);
-            $filledUsdc = $this->resolveFilledUsdc($side, $normalizedNotional->__toString(), $result['response'] ?? []);
-
-            // 构建初始 settlement_payload，包含 condition_id
+            $filledUsdc = $this->resolveFilledUsdc($side, $normalizedNotional, $result['response'] ?? []);
             $conditionId = $result['response']['market'] ?? null;
             $settlementPayload = $conditionId ? ['condition_id' => $conditionId] : null;
 
@@ -466,14 +170,40 @@ class PmExecuteOrderIntentJob implements ShouldQueue
                 ]
             );
 
+            if (in_array($remoteStatus, [PmOrder::STATUS_FILLED, PmOrder::STATUS_PARTIAL], true)) {
+                $purchaseTrackingService->recordBuyOrder($savedOrder);
+            }
+
+            if ($side === PolymarketTradingService::SIDE_SELL && in_array($remoteStatus, [PmOrder::STATUS_FILLED, PmOrder::STATUS_PARTIAL], true)) {
+                $filledSize = $savedOrder->response_payload['size_matched'] ?? $savedOrder->response_payload['filled_size'] ?? $requestContext['normalized_size'] ?? '0';
+                if (is_string($filledSize) || is_numeric($filledSize)) {
+                    $allocation = $purchaseTrackingService->allocateForSell($savedOrder, (string) $filledSize);
+                    $savedOrder->request_payload = array_merge(is_array($savedOrder->request_payload) ? $savedOrder->request_payload : [], [
+                        'sell_allocation' => $allocation,
+                    ]);
+                    $savedOrder->save();
+                }
+            }
+
             if (in_array($remoteStatus, [PmOrder::STATUS_SUBMITTED, PmOrder::STATUS_PARTIAL], true)) {
                 PmSyncOrderStatusJob::dispatch($savedOrder->id)->delay(now()->addSeconds(3));
+            }
+            if (in_array($remoteStatus, [PmOrder::STATUS_FILLED, PmOrder::STATUS_PARTIAL], true)) {
+                PmSyncOrderSettlementJob::dispatch($savedOrder->id, false, false)->delay(now()->addSeconds(5));
             }
 
             $intent->status = PmOrderIntent::STATUS_SUBMITTED;
             $intent->skip_reason = null;
+            $intent->skip_category = null;
             $intent->last_error_code = null;
             $intent->last_error_message = null;
+            $intent->processed_at = now();
+            $intent->execution_mode = 'live';
+            $intent->execution_stage = 'submitted';
+            $intent->decision_payload = array_merge(
+                is_array($intent->decision_payload) ? $intent->decision_payload : [],
+                ['submit_result' => ['remote_status' => $remoteStatus, 'poly_order_id' => $savedOrder->poly_order_id]]
+            );
             $intent->save();
         } catch (\Throwable $e) {
             [$failureCategory, $isRetryable] = $this->classifyException($e->getMessage());
@@ -494,8 +224,16 @@ class PmExecuteOrderIntentJob implements ShouldQueue
 
             $intent->status = PmOrderIntent::STATUS_FAILED;
             $intent->skip_reason = 'submit_failed';
+            $intent->skip_category = $failureCategory;
             $intent->last_error_code = (string) ($e->getCode() ?: 'submit_failed');
             $intent->last_error_message = $e->getMessage();
+            $intent->processed_at = now();
+            $intent->execution_mode = 'live';
+            $intent->execution_stage = 'failed';
+            $intent->decision_payload = array_merge(
+                is_array($intent->decision_payload) ? $intent->decision_payload : [],
+                ['submit_error' => ['message' => $e->getMessage(), 'category' => $failureCategory]]
+            );
             $intent->save();
 
             if ($isRetryable && $this->attempts() < $this->tries) {
@@ -503,6 +241,90 @@ class PmExecuteOrderIntentJob implements ShouldQueue
                 return;
             }
         }
+    }
+
+    /**
+     * @param array<string,mixed> $context
+     */
+    private function markSkipped(PmOrderIntent $intent, string $reason, string $category, array $context, int $orderStatus = PmOrder::STATUS_REJECTED): void
+    {
+        $intent->status = PmOrderIntent::STATUS_SKIPPED;
+        $intent->skip_reason = $reason;
+        $intent->skip_category = $category;
+        $intent->last_error_code = $reason;
+        $intent->last_error_message = $reason;
+        $intent->processed_at = now();
+        $intent->execution_stage = 'skipped';
+        $intent->decision_payload = array_merge(is_array($intent->decision_payload) ? $intent->decision_payload : [], [
+            'skip' => ['reason' => $reason, 'category' => $category, 'context' => $context],
+        ]);
+        $intent->save();
+
+        PmOrder::updateOrCreate(
+            ['order_intent_id' => $intent->id],
+            [
+                'status' => $orderStatus,
+                'request_payload' => $context,
+                'response_payload' => null,
+                'error_code' => $reason,
+                'error_message' => $reason,
+                'failure_category' => $category,
+                'is_retryable' => false,
+                'retry_count' => max(0, $intent->attempt_count - 1),
+                'last_sync_at' => now(),
+            ]
+        );
+    }
+
+    /**
+     * @param array<string,mixed> $context
+     */
+    private function markFailed(
+        PmOrderIntent $intent,
+        string $reason,
+        string $category,
+        array $context,
+        int $orderStatus = PmOrder::STATUS_ERROR,
+        ?string $failureCategory = null
+    ): void {
+        $intent->status = PmOrderIntent::STATUS_FAILED;
+        $intent->skip_reason = $reason;
+        $intent->skip_category = $category;
+        $intent->last_error_code = $reason;
+        $intent->last_error_message = $reason;
+        $intent->processed_at = now();
+        $intent->execution_stage = 'failed';
+        $intent->decision_payload = array_merge(is_array($intent->decision_payload) ? $intent->decision_payload : [], [
+            'failure' => ['reason' => $reason, 'category' => $category, 'context' => $context],
+        ]);
+        $intent->save();
+
+        PmOrder::updateOrCreate(
+            ['order_intent_id' => $intent->id],
+            [
+                'status' => $orderStatus,
+                'request_payload' => $context,
+                'response_payload' => null,
+                'error_code' => $reason,
+                'error_message' => $reason,
+                'failure_category' => $failureCategory ?? $category,
+                'is_retryable' => false,
+                'retry_count' => max(0, $intent->attempt_count - 1),
+                'last_sync_at' => now(),
+            ]
+        );
+    }
+
+    private function mapReasonToCategory(string $reason): string
+    {
+        return match (true) {
+            str_contains($reason, 'allowance') => 'allowance',
+            str_contains($reason, 'balance') => 'balance',
+            str_contains($reason, 'slippage') => 'slippage',
+            str_contains($reason, 'token') => 'market',
+            str_contains($reason, 'task') => 'task',
+            default => 'validation',
+        };
     }
 
     /**

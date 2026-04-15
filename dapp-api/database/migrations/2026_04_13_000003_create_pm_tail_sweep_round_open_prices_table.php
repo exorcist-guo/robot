@@ -8,6 +8,10 @@ return new class extends Migration
 {
     public function up(): void
     {
+        if (Schema::hasTable('pm_tail_sweep_round_open_prices')) {
+            return;
+        }
+
         Schema::create('pm_tail_sweep_round_open_prices', function (Blueprint $table) {
             $table->id();
             $table->string('symbol', 32)->index();

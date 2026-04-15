@@ -68,6 +68,9 @@ class PmOrderIntent extends Model
 
     protected $casts = [
         'risk_snapshot' => 'array',
+        'decision_payload' => 'array',
+        'processing_started_at' => 'datetime',
+        'processed_at' => 'datetime',
     ];
 
     public function copyTask(): BelongsTo

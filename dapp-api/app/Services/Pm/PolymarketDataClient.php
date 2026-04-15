@@ -10,9 +10,9 @@ class PolymarketDataClient
 {
     private Client $client;
 
-    public function __construct(?Client $client = null)
+    public function __construct()
     {
-        $this->client = $client ?? new Client([
+        $this->client = new Client([
             'base_uri' => 'https://data-api.polymarket.com/',
             'timeout' => 15,
         ]);

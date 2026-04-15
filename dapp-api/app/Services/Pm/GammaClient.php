@@ -8,14 +8,14 @@ class GammaClient
 {
     private Client $client;
 
-    public function __construct(?Client $client = null)
+    public function __construct()
     {
         $baseUrl = rtrim((string) config('pm.gamma_base_url'), '/');
         if ($baseUrl === '') {
             $baseUrl = 'https://gamma-api.polymarket.com';
         }
 
-        $this->client = $client ?? new Client([
+        $this->client = new Client([
             'base_uri' => $baseUrl . '/',
             'timeout' => 15,
         ]);

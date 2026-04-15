@@ -12,6 +12,10 @@ return [
     'http_timeout' => (int) env('PM_HTTP_TIMEOUT', 90),
     'http_connect_timeout' => (int) env('PM_HTTP_CONNECT_TIMEOUT', 15),
     'leader_trade_source' => env('PM_LEADER_TRADE_SOURCE', 'data_api'),
+    'copy_execution_enabled' => filter_var(env('PM_COPY_EXECUTION_ENABLED', true), FILTER_VALIDATE_BOOL),
+    'copy_dry_run' => filter_var(env('PM_COPY_DRY_RUN', false), FILTER_VALIDATE_BOOL),
+    'copy_ignore_historical_trades_hours' => (int) env('PM_COPY_IGNORE_HISTORICAL_TRADES_HOURS', 0),
+    'copy_poll_interval_seconds' => (int) env('PM_COPY_POLL_INTERVAL_SECONDS', 5),
     'leader_trade_confirmations' => (int) env('PM_LEADER_TRADE_CONFIRMATIONS', 6),
     'leader_trade_reorg_buffer' => (int) env('PM_LEADER_TRADE_REORG_BUFFER', 20),
 
