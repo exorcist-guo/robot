@@ -5,11 +5,13 @@ namespace App\Services\Pm;
 use App\Models\Pm\PmOrder;
 use EthTool\Credential;
 use GuzzleHttp\Client;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Str;
 
 class PolymarketClaimService
 {
     private const REDEEM_POSITIONS_SELECTOR = '0x01b7037c';
+    private const NEG_RISK_REDEEM_POSITIONS_SELECTOR = '0xdbeccb23';
     private const ZERO_BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000000';
 
     public function __construct(
@@ -29,15 +31,18 @@ class PolymarketClaimService
         $conditionId = $this->resolveConditionId($order);
         $claimableUsdc = (int) ($order->claimable_usdc ?? 0);
         $indexSets = $this->resolveIndexSets($order);
+        $isNegativeRisk = $this->isNegativeRiskOrder($order);
         $calldata = null;
 
         if ($conditionId !== null) {
-            $calldata = $this->encodeRedeemPositionsCalldata(
-                (string) config('pm.claim_collateral_token', config('pm.collateral_token')),
-                self::ZERO_BYTES32,
-                $conditionId,
-                $indexSets,
-            );
+            $calldata = $isNegativeRisk
+                ? $this->encodeNegRiskRedeemCalldata($order, $conditionId)
+                : $this->encodeRedeemPositionsCalldata(
+                    (string) config('pm.claim_collateral_token', config('pm.collateral_token')),
+                    self::ZERO_BYTES32,
+                    $conditionId,
+                    $indexSets,
+                );
         }
 
         return [
@@ -47,23 +52,31 @@ class PolymarketClaimService
             'trading_address' => $wallet?->tradingAddress(),
             'chain_id' => (int) config('pm.chain_id', 137),
             'rpc_url_configured' => trim((string) config('pm.polygon_rpc_url')) !== '',
-            'contract' => strtolower((string) config('pm.ctf_contract')),
+            'contract' => strtolower((string) ($isNegativeRisk ? config('pm.neg_risk_adapter_contract') : config('pm.ctf_contract'))),
             'method' => 'redeemPositions',
-            'signature' => 'redeemPositions(address,bytes32,bytes32,uint256[])',
-            'selector' => self::REDEEM_POSITIONS_SELECTOR,
-            'params' => [
-                'collateralToken' => strtolower((string) config('pm.claim_collateral_token', config('pm.collateral_token'))),
-                'parentCollectionId' => self::ZERO_BYTES32,
-                'conditionId' => $conditionId,
-                'indexSets' => $indexSets,
-            ],
+            'signature' => $isNegativeRisk
+                ? 'redeemPositions(bytes32,uint256[])'
+                : 'redeemPositions(address,bytes32,bytes32,uint256[])',
+            'selector' => $isNegativeRisk ? self::NEG_RISK_REDEEM_POSITIONS_SELECTOR : self::REDEEM_POSITIONS_SELECTOR,
+            'params' => $isNegativeRisk
+                ? [
+                    'conditionId' => $conditionId,
+                    'amounts' => $this->resolveNegRiskRedeemAmounts($order),
+                ]
+                : [
+                    'collateralToken' => strtolower((string) config('pm.claim_collateral_token', config('pm.collateral_token'))),
+                    'parentCollectionId' => self::ZERO_BYTES32,
+                    'conditionId' => $conditionId,
+                    'indexSets' => $indexSets,
+                ],
             'encoded_args' => $calldata !== null ? substr($calldata, 10) : null,
             'calldata' => $calldata,
             'claimable_usdc' => $claimableUsdc,
             'claimable_tokens' => $order->filled_size,
+            'negative_risk' => $isNegativeRisk,
             'source' => [
                 'condition_id' => $this->detectConditionIdSource($order),
-                'index_sets' => 'market_tokens',
+                'index_sets' => $isNegativeRisk ? 'neg_risk_amounts' : 'market_tokens',
             ],
         ];
     }
@@ -122,7 +135,12 @@ class PolymarketClaimService
         $gasPriceHex = '0x' . dechex($safeGasPrice);
 
         $chainId = (int) config('pm.chain_id', 137);
-        $gasLimit = 220000;
+        $gasLimit = $this->resolveGasLimit($rpcUrl, [
+            'from' => $from,
+            'to' => (string) $plan['contract'],
+            'value' => $this->toRpcHex(0),
+            'data' => (string) $plan['calldata'],
+        ], (bool) ($plan['negative_risk'] ?? false));
 
         $raw = [
             'nonce' => $this->toRpcHex($nonce),
@@ -182,7 +200,7 @@ class PolymarketClaimService
                 if ($receipt !== null) {
                     return $this->receiptStatusSucceeded($receipt);
                 }
-            } catch (\Exception $e) {
+            } catch (\Exception) {
                 // 忽略查询错误，继续重试
             }
 
@@ -208,7 +226,7 @@ class PolymarketClaimService
         try {
             $result = $this->rpc($rpcUrl, 'eth_getTransactionReceipt', [$txHash]);
             return is_array($result) ? $result : null;
-        } catch (\Exception $e) {
+        } catch (\Exception) {
             return null;
         }
     }
@@ -260,6 +278,21 @@ class PolymarketClaimService
         return self::REDEEM_POSITIONS_SELECTOR . $head . $tail;
     }
 
+    private function encodeNegRiskRedeemCalldata(PmOrder $order, string $conditionId): string
+    {
+        $amounts = $this->resolveNegRiskRedeemAmounts($order);
+        $head = '';
+        $head .= $this->encodeBytes32($conditionId);
+        $head .= $this->encodeUint256(64);
+
+        $tail = $this->encodeUint256(count($amounts));
+        foreach ($amounts as $amount) {
+            $tail .= $this->encodeDecimalUint256($amount);
+        }
+
+        return self::NEG_RISK_REDEEM_POSITIONS_SELECTOR . $head . $tail;
+    }
+
     /**
      * @return array<int,int>
      */
@@ -279,6 +312,32 @@ class PolymarketClaimService
         }
 
         return [1, 2];
+    }
+
+    private function isNegativeRiskOrder(PmOrder $order): bool
+    {
+        return (bool) (
+            Arr::get($order->settlement_payload, 'market.negativeRisk')
+            ?? Arr::get($order->settlement_payload, 'market.negative_risk')
+            ?? Arr::get($order->settlement_payload, 'negativeRisk')
+            ?? Arr::get($order->settlement_payload, 'negative_risk')
+            ?? false
+        );
+    }
+
+    /**
+     * @return array<int,string>
+     */
+    private function resolveNegRiskRedeemAmounts(PmOrder $order): array
+    {
+        $amount = $this->decimalToTokenUnits((string) ($order->filled_size ?? '0'));
+        $outcome = strtolower(trim((string) ($order->outcome ?? $order->winning_outcome ?? '')));
+
+        if ($outcome === 'no' || $outcome === 'down') {
+            return ['0', $amount];
+        }
+
+        return [$amount, '0'];
     }
 
     private function resolveConditionId(PmOrder $order): ?string
@@ -338,6 +397,28 @@ class PolymarketClaimService
         return str_pad(dechex($value), 64, '0', STR_PAD_LEFT);
     }
 
+    private function encodeDecimalUint256(string $value): string
+    {
+        return str_pad($this->decToHex($value), 64, '0', STR_PAD_LEFT);
+    }
+
+    private function decimalToTokenUnits(string $amount): string
+    {
+        $amount = trim($amount);
+        if ($amount === '' || !preg_match('/^\d+(\.\d+)?$/', $amount)) {
+            return '0';
+        }
+
+        if (!str_contains($amount, '.')) {
+            return bcmul($amount, '1000000', 0);
+        }
+
+        [$whole, $fraction] = explode('.', $amount, 2);
+        $fraction = substr(str_pad($fraction, 6, '0'), 0, 6);
+
+        return bcadd(bcmul($whole, '1000000', 0), $fraction, 0);
+    }
+
     /**
      * @param array<int,mixed> $params
      */
@@ -375,6 +456,40 @@ class PolymarketClaimService
         }
 
         return (int) hexdec(str_starts_with($value, '0x') ? substr($value, 2) : $value);
+    }
+
+    private function resolveGasLimit(string $rpcUrl, array $tx, bool $isNegativeRisk): int
+    {
+        $fallback = $isNegativeRisk ? 400000 : 220000;
+
+        try {
+            $estimated = $this->rpc($rpcUrl, 'eth_estimateGas', [$tx]);
+            $estimatedInt = $this->rpcQuantityToInt($estimated);
+            if ($estimatedInt <= 0) {
+                return $fallback;
+            }
+
+            return max((int) ceil($estimatedInt * 1.3), $fallback);
+        } catch (\Throwable) {
+            return $fallback;
+        }
+    }
+
+    private function decToHex(string $decimal): string
+    {
+        $decimal = trim($decimal);
+        if ($decimal === '' || $decimal === '0') {
+            return '0';
+        }
+
+        $hex = '';
+        while (bccomp($decimal, '0', 0) > 0) {
+            $mod = (int) bcmod($decimal, '16');
+            $hex = dechex($mod) . $hex;
+            $decimal = bcdiv($decimal, '16', 0);
+        }
+
+        return $hex === '' ? '0' : $hex;
     }
 
     private function toRpcHex(int $value): string

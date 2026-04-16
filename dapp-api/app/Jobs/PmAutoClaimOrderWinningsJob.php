@@ -82,9 +82,17 @@ class PmAutoClaimOrderWinningsJob implements ShouldQueue
 
                     if ($confirmed) {
                         $order->claim_status = PmOrder::CLAIM_STATUS_CONFIRMED;
+                        $receipt = $claimService->getTransactionReceipt($result['tx_hash']);
                         $order->claim_payload = array_merge(
                             is_array($order->claim_payload) ? $order->claim_payload : [],
-                            ['confirmed_at' => now()->toIso8601String()]
+                            [
+                                'confirmed_at' => now()->toIso8601String(),
+                                'confirmation' => [
+                                    'status' => $receipt['status'] ?? null,
+                                    'block_number' => $receipt['blockNumber'] ?? null,
+                                    'gas_used' => $receipt['gasUsed'] ?? null,
+                                ],
+                            ]
                         );
                         $order->save();
                     }

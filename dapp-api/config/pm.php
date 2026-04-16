@@ -70,6 +70,7 @@ return [
     'chain_id' => (int) env('PM_CHAIN_ID', 137),
     'exchange_contract' => env('PM_EXCHANGE_CONTRACT', '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E'),
     'neg_risk_exchange_contract' => env('PM_NEG_RISK_EXCHANGE_CONTRACT', '0xC5d563A36AE78145C45a50134d48A1215220f80a'),
+    'neg_risk_adapter_contract' => strtolower((string) env('PM_NEG_RISK_ADAPTER_CONTRACT', '0xd91e80cf2e7be2e162c6513ced06f1dd0da35296')),
     'ctf_contract' => strtolower((string) env('PM_CTF_CONTRACT', '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045')),
     'polygon_rpc_url' => env('PM_POLYGON_RPC_URL', ''),
     'collateral_token' => strtolower((string) env('PM_COLLATERAL_TOKEN', '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174')),

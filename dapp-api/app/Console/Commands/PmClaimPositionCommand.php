@@ -7,6 +7,7 @@ use App\Services\Pm\PmPrivateKeyResolver;
 use App\Services\Pm\PolygonRpcService;
 use EthTool\Credential;
 use Illuminate\Console\Command;
+use Illuminate\Support\Arr;
 
 class PmClaimPositionCommand extends Command
 {
@@ -247,26 +248,19 @@ class PmClaimPositionCommand extends Command
         $conditionId = strtolower($position['conditionId'] ?? '');
         $collateralToken = config('pm.claim_collateral_token', config('pm.collateral_token'));
         $ctfContract = config('pm.ctf_contract');
+        $negRiskAdapterContract = config('pm.neg_risk_adapter_contract');
         $parentCollectionId = '0x0000000000000000000000000000000000000000000000000000000000000000';
+        $isNegativeRisk = (bool) ($position['negativeRisk'] ?? false);
         $indexSets = $this->resolveIndexSetsFromPosition($position);
 
-        $this->line("合约地址: {$ctfContract}");
+        $this->line("合约地址: " . ($isNegativeRisk ? $negRiskAdapterContract : $ctfContract));
         $this->line("Condition ID: {$conditionId}");
+        $this->line("Negative Risk: " . ($isNegativeRisk ? 'yes' : 'no'));
 
         // 3. 编码 calldata
-        $selector = '0x01b7037c'; // redeemPositions
-        $head = '';
-        $head .= $this->encodeAddress($collateralToken);
-        $head .= $this->encodeBytes32($parentCollectionId);
-        $head .= $this->encodeBytes32($conditionId);
-        $head .= $this->encodeUint256(128);
-
-        $tail = $this->encodeUint256(count($indexSets));
-        foreach ($indexSets as $indexSet) {
-            $tail .= $this->encodeUint256($indexSet);
-        }
-
-        $calldata = $selector . $head . $tail;
+        $calldata = $isNegativeRisk
+            ? $this->encodeNegRiskRedeemCalldata($position)
+            : $this->encodeCtfRedeemCalldata((string) $collateralToken, $parentCollectionId, $conditionId, $indexSets);
 
         // 4. 准备交易
         $chainId = (int) config('pm.chain_id', 137);
@@ -285,7 +279,12 @@ class PmClaimPositionCommand extends Command
         $baseGasPrice = $rpcService->rpcQuantityToInt($rpcService->gasPrice());
         $safeGasPrice = (int) ($baseGasPrice * 1.2);
         $gasPriceHex = $rpcService->toRpcHex($safeGasPrice);
-        $gasLimit = 220000;
+        $gasLimit = $this->resolveGasLimit($rpcService, [
+            'from' => $from,
+            'to' => $isNegativeRisk ? $negRiskAdapterContract : $ctfContract,
+            'value' => '0x0',
+            'data' => $calldata,
+        ], $isNegativeRisk);
 
         $this->line("Nonce: {$nonce}");
         $this->line("Gas Price: " . number_format($safeGasPrice / 1e9, 2) . " Gwei");
@@ -295,7 +294,7 @@ class PmClaimPositionCommand extends Command
         // 6. 发送前先做 eth_call 预检查，避免错误参数直接上链
         $rawCall = [
             'from' => $from,
-            'to' => $ctfContract,
+            'to' => $isNegativeRisk ? $negRiskAdapterContract : $ctfContract,
             'value' => '0x0',
             'data' => $calldata,
         ];
@@ -312,7 +311,7 @@ class PmClaimPositionCommand extends Command
             'nonce' => $rpcService->toRpcHex($nonce),
             'gasPrice' => $gasPriceHex,
             'gasLimit' => $rpcService->toRpcHex($gasLimit),
-            'to' => $ctfContract,
+            'to' => $isNegativeRisk ? $negRiskAdapterContract : $ctfContract,
             'value' => $rpcService->toRpcHex(0),
             'data' => $calldata,
             'chainId' => $chainId,
@@ -401,9 +400,69 @@ class PmClaimPositionCommand extends Command
         ];
     }
 
-    private function encodeAddress(string $value): string
+    private function encodeCtfRedeemCalldata(string $collateralToken, string $parentCollectionId, string $conditionId, array $indexSets): string
     {
-        return str_pad(strtolower(ltrim($value, '0x')), 64, '0', STR_PAD_LEFT);
+        $selector = '0x01b7037c'; // redeemPositions(address,bytes32,bytes32,uint256[])
+        $head = '';
+        $head .= $this->encodeAddress($collateralToken);
+        $head .= $this->encodeBytes32($parentCollectionId);
+        $head .= $this->encodeBytes32($conditionId);
+        $head .= $this->encodeUint256(128);
+
+        $tail = $this->encodeUint256(count($indexSets));
+        foreach ($indexSets as $indexSet) {
+            $tail .= $this->encodeUint256($indexSet);
+        }
+
+        return $selector . $head . $tail;
+    }
+
+    private function encodeNegRiskRedeemCalldata(array $position): string
+    {
+        $selector = '0xdbeccb23'; // redeemPositions(bytes32,uint256[])
+        $conditionId = strtolower((string) ($position['conditionId'] ?? ''));
+        $amounts = $this->resolveNegRiskRedeemAmounts($position);
+
+        $head = '';
+        $head .= $this->encodeBytes32($conditionId);
+        $head .= $this->encodeUint256(64);
+
+        $tail = $this->encodeUint256(count($amounts));
+        foreach ($amounts as $amount) {
+            $tail .= $this->encodeDecimalUint256((string) $amount);
+        }
+
+        return $selector . $head . $tail;
+    }
+
+    private function resolveNegRiskRedeemAmounts(array $position): array
+    {
+        $size = (string) ($position['size'] ?? '0');
+        $scaledAmount = $this->decimalToTokenUnits($size);
+        $outcomeIndex = Arr::get($position, 'outcomeIndex');
+
+        if (is_numeric($outcomeIndex) && (int) $outcomeIndex === 1) {
+            return ['0', $scaledAmount];
+        }
+
+        return [$scaledAmount, '0'];
+    }
+
+    private function decimalToTokenUnits(string $amount): string
+    {
+        $amount = trim($amount);
+        if ($amount === '' || !preg_match('/^\d+(\.\d+)?$/', $amount)) {
+            return '0';
+        }
+
+        if (!str_contains($amount, '.')) {
+            return bcmul($amount, '1000000', 0);
+        }
+
+        [$whole, $fraction] = explode('.', $amount, 2);
+        $fraction = substr(str_pad($fraction, 6, '0'), 0, 6);
+
+        return bcadd(bcmul($whole, '1000000', 0), $fraction, 0);
     }
 
     private function encodeBytes32(string $value): string
@@ -414,6 +473,12 @@ class PmClaimPositionCommand extends Command
     private function encodeUint256(int $value): string
     {
         return str_pad(dechex($value), 64, '0', STR_PAD_LEFT);
+    }
+
+    private function encodeDecimalUint256(string $value): string
+    {
+        $hex = $this->decToHex($value);
+        return str_pad($hex, 64, '0', STR_PAD_LEFT);
     }
 
     /**
@@ -484,6 +549,24 @@ class PmClaimPositionCommand extends Command
         }
 
         return $afterBalance < $beforeBalance;
+    }
+
+    private function resolveGasLimit(PolygonRpcService $rpcService, array $tx, bool $isNegativeRisk): int
+    {
+        $fallback = $isNegativeRisk ? 400000 : 220000;
+
+        try {
+            $estimated = $rpcService->call('eth_estimateGas', [$tx]);
+            $estimatedInt = $rpcService->rpcQuantityToInt($estimated);
+            if ($estimatedInt <= 0) {
+                return $fallback;
+            }
+
+            $buffered = (int) ceil($estimatedInt * 1.3);
+            return max($buffered, $fallback);
+        } catch (\Throwable) {
+            return $fallback;
+        }
     }
 
     private function decToHex(string $decimal): string
