@@ -15,9 +15,9 @@ class PmClaimPositionCommand extends Command
                             {address? : 资金方地址或托管钱包地址}
                             {--condition-id= : 指定要领取的 Condition ID}
                             {--dry-run : 只查询不执行领取}
+                            {--include-losing : 包含已输但链上仍可 redeem 的持仓}
                             {--scan-all : 扫描所有钱包并自动结算}
                             {--min-age=3600 : 最小订单年龄（秒），默认 3600 秒（1 小时）}';
-
     protected $description = '查询并领取指定地址的 Polymarket 持仓奖励';
 
     public function handle(PmPrivateKeyResolver $resolver, PolygonRpcService $rpcService): int
@@ -39,6 +39,7 @@ class PmClaimPositionCommand extends Command
         $address = strtolower(trim($address));
         $conditionId = $this->option('condition-id');
         $dryRun = $this->option('dry-run');
+        $includeLosing = (bool) $this->option('include-losing');
 
         $this->info("========== 查询持仓 ==========\n");
 
@@ -86,16 +87,17 @@ class PmClaimPositionCommand extends Command
             $currentValue = (float) ($pos['currentValue'] ?? 0);
             $isRedeemable = (bool) ($pos['redeemable'] ?? false);
             $hasChainBalance = $this->hasChainTokenBalance($wallet, (string) ($pos['asset'] ?? ''));
-            $isClaimable = $currentValue > 0 && $isRedeemable && $hasChainBalance;
+            $canRedeemLosing = $includeLosing && $currentValue <= 0 && $isRedeemable && $hasChainBalance;
+            $isClaimable = (($currentValue > 0 && $isRedeemable) || $canRedeemLosing) && $hasChainBalance;
             $isLaggingRedeemed = $currentValue > 0 && $isRedeemable && !$hasChainBalance;
 
             if ($isClaimable) {
                 $claimablePositions[] = $pos;
-                $totalValue += $currentValue;
+                $totalValue += max($currentValue, 0);
             }
 
             $status = $isClaimable
-                ? '✅ 可领取'
+                ? ($canRedeemLosing ? '♻️ 可兑换(已输)' : '✅ 可领取')
                 : ($isLaggingRedeemed
                     ? '☑️ 已兑换(接口延迟)'
                     : ($currentValue > 0 ? '⏳ 未结算' : '❌ 已输'));
@@ -117,6 +119,9 @@ class PmClaimPositionCommand extends Command
             // $this->line("    投入成本: $" . number_format($pos['initialValue'] ?? 0, 2));
             $this->line("    当前价值: $" . number_format($currentValue, 2));
             $this->line("    盈亏: $" . number_format($pos['cashPnl'] ?? 0, 2) . " (" . number_format($pos['percentPnl'] ?? 0, 2) . "%)");
+            if ($canRedeemLosing) {
+                $this->line("    说明: 已输但链上仍有可兑换余额");
+            }
 
             if ($isClaimable) {
                 $this->line("    Condition ID: " . ($pos['conditionId'] ?? 'N/A'));
@@ -169,7 +174,8 @@ class PmClaimPositionCommand extends Command
         foreach ($claimablePositions as $index => $position) {
             $this->info("[" . ($index + 1) . "/{$totalCount}] 准备领取:");
             $this->line("市场: " . ($position['title'] ?? 'Unknown'));
-            $this->line("金额: $" . number_format($position['currentValue'], 2));
+            $label = ((float) ($position['currentValue'] ?? 0)) > 0 ? '金额' : '可返还金额';
+            $this->line($label . ': $' . number_format($position['currentValue'], 2));
             $this->line("Condition ID: " . ($position['conditionId'] ?? 'N/A'));
             $this->newLine();
 
@@ -465,6 +471,11 @@ class PmClaimPositionCommand extends Command
         return bcadd(bcmul($whole, '1000000', 0), $fraction, 0);
     }
 
+    private function encodeAddress(string $value): string
+    {
+        return str_pad(strtolower(ltrim($value, '0x')), 64, '0', STR_PAD_LEFT);
+    }
+
     private function encodeBytes32(string $value): string
     {
         return str_pad(strtolower(ltrim($value, '0x')), 64, '0', STR_PAD_LEFT);
@@ -593,6 +604,7 @@ class PmClaimPositionCommand extends Command
     {
         $minAge = (int) $this->option('min-age');
         $dryRun = $this->option('dry-run');
+        $includeLosing = (bool) $this->option('include-losing');
         $now = time();
         $cutoffTime = $now - $minAge;
 
@@ -671,10 +683,12 @@ class PmClaimPositionCommand extends Command
                         $age = $now - $orderTime;
 
                         // 只处理超过最小年龄、且接口可领、且链上仍有 token 余额的持仓
-                        if ($age >= $minAge && $currentValue > 0 && $isRedeemable && $hasChainBalance) {
+                        if ($age >= $minAge && (($currentValue > 0 && $isRedeemable) || ($includeLosing && $currentValue <= 0 && $isRedeemable)) && $hasChainBalance) {
                             $claimablePositions[] = $pos;
-                            $totalValue += $currentValue;
-                            $this->line("  ✅ 可领取: " . ($pos['title'] ?? 'Unknown') . " - $" . number_format($currentValue, 2) . " (订单时间: " . date('Y-m-d H:i:s', $orderTime) . ", 年龄: " . round($age / 3600, 1) . "h)");
+                            $totalValue += max($currentValue, 0);
+                            $isLosingRedeemable = $includeLosing && $currentValue <= 0 && $isRedeemable;
+                            $prefix = $isLosingRedeemable ? '♻️ 可兑换(已输)' : '✅ 可领取';
+                            $this->line("  {$prefix}: " . ($pos['title'] ?? 'Unknown') . " - $" . number_format($currentValue, 2) . " (订单时间: " . date('Y-m-d H:i:s', $orderTime) . ", 年龄: " . round($age / 3600, 1) . "h)");
                         } else {
                             $this->line("  ⏳ 太新: " . ($pos['title'] ?? 'Unknown') . " - $" . number_format($currentValue, 2) . " (订单时间: " . date('Y-m-d H:i:s', $orderTime) . ", 年龄: " . round($age / 3600, 1) . "h)");
                         }
