@@ -88,8 +88,10 @@ class PmPollLeaderTradesCommand extends Command
     private function persistTrades(PmLeader $leader, array $trades, string $mode): void
     {
         $inserted = 0;
-        $time = time() - 60;
+        $time = time() - 1800;
+
         foreach ($trades as $normalized) {
+
             if (empty($normalized['token_id']) || empty($normalized['trade_id'])) {
                 continue;
             }

@@ -62,7 +62,7 @@ class PmVerifyClaimTxCommand extends Command
             return 0;
         }
 
-        $status = ($receipt['status'] ?? '0x0') === '0x1' ? 'SUCCESS' : 'FAILED';
+        $status = $claimService->receiptStatusSucceeded($receipt) ? 'SUCCESS' : 'FAILED';
         $blockNumber = isset($receipt['blockNumber']) ? hexdec($receipt['blockNumber']) : 'N/A';
         $gasUsed = isset($receipt['gasUsed']) ? hexdec($receipt['gasUsed']) : 'N/A';
 
@@ -126,7 +126,7 @@ class PmVerifyClaimTxCommand extends Command
                 continue;
             }
 
-            $status = ($receipt['status'] ?? '0x0') === '0x1' ? 'SUCCESS' : 'FAILED';
+            $status = $claimService->receiptStatusSucceeded($receipt) ? 'SUCCESS' : 'FAILED';
             $blockNumber = isset($receipt['blockNumber']) ? hexdec($receipt['blockNumber']) : 'N/A';
 
             if ($status === 'SUCCESS') {

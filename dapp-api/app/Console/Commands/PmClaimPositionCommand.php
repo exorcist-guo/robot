@@ -4,8 +4,8 @@ namespace App\Console\Commands;
 
 use App\Models\Pm\PmCustodyWallet;
 use App\Services\Pm\PmPrivateKeyResolver;
+use App\Services\Pm\PolygonRpcService;
 use EthTool\Credential;
-use GuzzleHttp\Client;
 use Illuminate\Console\Command;
 
 class PmClaimPositionCommand extends Command
@@ -19,13 +19,13 @@ class PmClaimPositionCommand extends Command
 
     protected $description = '查询并领取指定地址的 Polymarket 持仓奖励';
 
-    public function handle(PmPrivateKeyResolver $resolver): int
+    public function handle(PmPrivateKeyResolver $resolver, PolygonRpcService $rpcService): int
     {
         $scanAll = $this->option('scan-all');
 
         // 如果是扫描所有钱包模式
         if ($scanAll) {
-            return $this->scanAllWallets($resolver);
+            return $this->scanAllWallets($resolver, $rpcService);
         }
 
         // 单个地址模式
@@ -173,20 +173,36 @@ class PmClaimPositionCommand extends Command
             $this->newLine();
 
             try {
-                $result = $this->claimPosition($wallet, $position, $resolver);
+                $result = $this->claimPosition($wallet, $position, $resolver, $rpcService);
 
                 if ($result['success']) {
                     $successCount++;
-                    $this->info("✅ 领取成功!");
+                    $this->info("✅ 领取成功（链上执行成功且余额校验通过）");
                     $this->line("交易哈希: " . $result['tx_hash']);
                     $this->line("查看交易: https://polygonscan.com/tx/" . $result['tx_hash']);
-                    $this->line("Gas 使用: " . number_format($result['gas_used']));
-                    $this->line("区块号: " . number_format($result['block_number']));
+                    $this->line("Receipt Status: " . var_export($result['receipt_status'] ?? null, true));
+                    $this->line("Gas 使用: " . number_format($result['gas_used'] ?? 0));
+                    $this->line("区块号: " . number_format($result['block_number'] ?? 0));
+                    if (array_key_exists('before_balance', $result)) {
+                        $this->line("领取前 Token 余额: " . (($result['before_balance'] ?? null) === null ? 'N/A' : (string) $result['before_balance']));
+                    }
+                    if (array_key_exists('after_balance', $result)) {
+                        $this->line("领取后 Token 余额: " . (($result['after_balance'] ?? null) === null ? 'N/A' : (string) $result['after_balance']));
+                    }
                 } else {
                     $failCount++;
                     $this->error("❌ 领取失败: " . ($result['error'] ?? 'Unknown error'));
                     if (!empty($result['tx_hash'])) {
                         $this->line("交易哈希: " . $result['tx_hash']);
+                    }
+                    if (array_key_exists('receipt_status', $result)) {
+                        $this->line("Receipt Status: " . var_export($result['receipt_status'], true));
+                    }
+                    if (array_key_exists('before_balance', $result)) {
+                        $this->line("领取前 Token 余额: " . (($result['before_balance'] ?? null) === null ? 'N/A' : (string) $result['before_balance']));
+                    }
+                    if (array_key_exists('after_balance', $result)) {
+                        $this->line("领取后 Token 余额: " . (($result['after_balance'] ?? null) === null ? 'N/A' : (string) $result['after_balance']));
                     }
                 }
             } catch (\Exception $e) {
@@ -215,7 +231,7 @@ class PmClaimPositionCommand extends Command
         return $failCount > 0 ? 1 : 0;
     }
 
-    private function claimPosition(PmCustodyWallet $wallet, array $position, PmPrivateKeyResolver $resolver): array
+    private function claimPosition(PmCustodyWallet $wallet, array $position, PmPrivateKeyResolver $resolver, PolygonRpcService $rpcService): array
     {
         $this->info("\n========== 执行领取 ==========\n");
 
@@ -253,19 +269,22 @@ class PmClaimPositionCommand extends Command
         $calldata = $selector . $head . $tail;
 
         // 4. 准备交易
-        $rpcUrl = config('pm.polygon_rpc_url');
         $chainId = (int) config('pm.chain_id', 137);
         $credential = Credential::fromKey(ltrim($privateKey, '0x'));
         $from = strtolower($credential->getAddress());
+        $tokenId = (string) ($position['asset'] ?? '');
+        $beforeBalance = $this->getChainTokenBalance($wallet, $tokenId, $rpcService, true);
 
         $this->line("从地址: {$from}");
+        if ($beforeBalance !== null) {
+            $this->line("领取前 Token 余额: {$beforeBalance}");
+        }
 
         // 5. 获取 nonce 和 gas price
-        $nonce = hexdec(ltrim($this->rpc($rpcUrl, 'eth_getTransactionCount', [$from, 'pending']), '0x'));
-        $gasPriceHex = $this->rpc($rpcUrl, 'eth_gasPrice', []);
-        $baseGasPrice = hexdec(ltrim($gasPriceHex, '0x'));
+        $nonce = $rpcService->getTransactionCount($from, 'pending');
+        $baseGasPrice = $rpcService->rpcQuantityToInt($rpcService->gasPrice());
         $safeGasPrice = (int) ($baseGasPrice * 1.2);
-        $gasPriceHex = '0x' . dechex($safeGasPrice);
+        $gasPriceHex = $rpcService->toRpcHex($safeGasPrice);
         $gasLimit = 220000;
 
         $this->line("Nonce: {$nonce}");
@@ -282,7 +301,7 @@ class PmClaimPositionCommand extends Command
         ];
 
         try {
-            $this->rpc($rpcUrl, 'eth_call', [$rawCall, 'latest']);
+            $rpcService->call('eth_call', [$rawCall, 'latest']);
             $this->line("✅ eth_call 预检查通过");
         } catch (\Exception $e) {
             throw new \RuntimeException('eth_call 预检查失败: ' . $e->getMessage());
@@ -290,22 +309,22 @@ class PmClaimPositionCommand extends Command
 
         // 7. 签名并发送交易
         $raw = [
-            'nonce' => '0x' . dechex($nonce),
+            'nonce' => $rpcService->toRpcHex($nonce),
             'gasPrice' => $gasPriceHex,
-            'gasLimit' => '0x' . dechex($gasLimit),
+            'gasLimit' => $rpcService->toRpcHex($gasLimit),
             'to' => $ctfContract,
-            'value' => '0x0',
+            'value' => $rpcService->toRpcHex(0),
             'data' => $calldata,
             'chainId' => $chainId,
         ];
 
         $this->line("\n🚀 发送交易...");
         $signed = $credential->signTransaction($raw);
-        $txHash = $this->rpc($rpcUrl, 'eth_sendRawTransaction', [$signed]);
+        $txHash = $rpcService->sendRawTransaction($signed);
 
         $this->line("✅ 交易已提交: {$txHash}");
 
-        // 7. 等待确认
+        // 8. 等待确认
         $this->line("\n⏳ 等待交易确认...");
         $bar = $this->output->createProgressBar(30);
         $bar->start();
@@ -315,26 +334,57 @@ class PmClaimPositionCommand extends Command
             $bar->advance();
 
             try {
-                $receipt = $this->rpc($rpcUrl, 'eth_getTransactionReceipt', [$txHash]);
+                $receipt = $rpcService->getTransactionReceipt($txHash);
                 if ($receipt !== null) {
                     $bar->finish();
                     $this->newLine();
 
-                    $status = $receipt['status'] ?? '0x0';
-                    if ($status === '0x1') {
+                    $rawStatus = $receipt['status'] ?? null;
+                    $normalizedStatus = $rpcService->normalizeReceiptStatus($rawStatus);
+                    $this->line('Receipt Status: ' . var_export($rawStatus, true));
+
+                    if ($rpcService->receiptStatusSucceeded($receipt)) {
+                        $this->line('✅ 链上执行成功，开始校验领取后余额');
+
+                        $afterBalance = $this->getChainTokenBalance($wallet, $tokenId, $rpcService, false);
+                        if ($afterBalance !== null) {
+                            $this->line("领取后 Token 余额: {$afterBalance}");
+                        }
+
+                        $verified = $this->verifyClaimedPositionBalance($beforeBalance, $afterBalance);
+                        if (!$verified) {
+                            return [
+                                'success' => false,
+                                'error' => '链上交易成功，但领取后余额未下降，未确认业务领取成功',
+                                'tx_hash' => $txHash,
+                                'block_number' => isset($receipt['blockNumber']) ? hexdec($receipt['blockNumber']) : 0,
+                                'gas_used' => isset($receipt['gasUsed']) ? hexdec($receipt['gasUsed']) : 0,
+                                'receipt_status' => $rawStatus,
+                                'normalized_receipt_status' => $normalizedStatus,
+                                'before_balance' => $beforeBalance,
+                                'after_balance' => $afterBalance,
+                            ];
+                        }
+
                         return [
                             'success' => true,
                             'tx_hash' => $txHash,
-                            'block_number' => hexdec($receipt['blockNumber']),
-                            'gas_used' => hexdec($receipt['gasUsed']),
-                        ];
-                    } else {
-                        return [
-                            'success' => false,
-                            'error' => '交易失败',
-                            'tx_hash' => $txHash,
+                            'block_number' => isset($receipt['blockNumber']) ? hexdec($receipt['blockNumber']) : 0,
+                            'gas_used' => isset($receipt['gasUsed']) ? hexdec($receipt['gasUsed']) : 0,
+                            'receipt_status' => $rawStatus,
+                            'normalized_receipt_status' => $normalizedStatus,
+                            'before_balance' => $beforeBalance,
+                            'after_balance' => $afterBalance,
                         ];
                     }
+
+                    return [
+                        'success' => false,
+                        'error' => '交易失败',
+                        'tx_hash' => $txHash,
+                        'receipt_status' => $rawStatus,
+                        'normalized_receipt_status' => $normalizedStatus,
+                    ];
                 }
             } catch (\Exception $e) {
                 // 继续等待
@@ -349,26 +399,6 @@ class PmClaimPositionCommand extends Command
             'error' => '交易确认超时，请手动查看: https://polygonscan.com/tx/' . $txHash,
             'tx_hash' => $txHash,
         ];
-    }
-
-    private function rpc(string $url, string $method, array $params): mixed
-    {
-        $client = new Client(['timeout' => 20]);
-        $response = $client->post($url, [
-            'json' => [
-                'jsonrpc' => '2.0',
-                'method' => $method,
-                'params' => $params,
-                'id' => 1,
-            ],
-        ]);
-
-        $json = json_decode($response->getBody()->getContents(), true);
-        if (!empty($json['error'])) {
-            throw new \RuntimeException($json['error']['message'] ?? 'RPC error');
-        }
-
-        return $json['result'] ?? null;
     }
 
     private function encodeAddress(string $value): string
@@ -410,41 +440,50 @@ class PmClaimPositionCommand extends Command
      */
     private function hasChainTokenBalance(PmCustodyWallet $wallet, string $tokenId): bool
     {
+        $balance = $this->getChainTokenBalance($wallet, $tokenId, null, true);
+        return $balance === null ? true : $balance > 0;
+    }
+
+    private function getChainTokenBalance(PmCustodyWallet $wallet, string $tokenId, ?PolygonRpcService $rpcService = null, bool $fallbackToClaimable = false): ?int
+    {
         $tokenId = trim($tokenId);
         if ($tokenId === '' || !preg_match('/^\d+$/', $tokenId)) {
-            return false;
+            return 0;
         }
 
-        $rpcUrl = (string) config('pm.polygon_rpc_url');
         $ctfContract = (string) config('pm.ctf_contract');
-        if ($rpcUrl === '' || $ctfContract === '') {
-            return true;
+        if ($ctfContract === '') {
+            return $fallbackToClaimable ? null : 0;
         }
 
         try {
+            $rpcService ??= app(PolygonRpcService::class);
             $method = '0x00fdd58e'; // balanceOf(address,uint256)
             $addressHex = str_pad(substr(strtolower($wallet->signer_address), 2), 64, '0', STR_PAD_LEFT);
             $tokenHex = str_pad($this->decToHex($tokenId), 64, '0', STR_PAD_LEFT);
             $data = $method . $addressHex . $tokenHex;
-            $result = $this->rpc($rpcUrl, 'eth_call', [[
+            $result = $rpcService->call('eth_call', [[
                 'to' => strtolower($ctfContract),
                 'data' => $data,
             ], 'latest']);
 
             if (!is_string($result)) {
-                return false;
+                return 0;
             }
 
-            $hex = strtolower(ltrim($result, '0x'));
-            if ($hex === '') {
-                return false;
-            }
-
-            return hexdec($hex) > 0;
+            return $rpcService->rpcQuantityToInt($result);
         } catch (\Throwable) {
-            // RPC 异常时不阻断领取，回退为接口判定可领取
-            return true;
+            return $fallbackToClaimable ? null : 0;
         }
+    }
+
+    private function verifyClaimedPositionBalance(?int $beforeBalance, ?int $afterBalance): bool
+    {
+        if ($beforeBalance === null || $afterBalance === null) {
+            return false;
+        }
+
+        return $afterBalance < $beforeBalance;
     }
 
     private function decToHex(string $decimal): string
@@ -467,7 +506,7 @@ class PmClaimPositionCommand extends Command
     /**
      * 扫描所有钱包并自动结算
      */
-    private function scanAllWallets(PmPrivateKeyResolver $resolver): int
+    private function scanAllWallets(PmPrivateKeyResolver $resolver, PolygonRpcService $rpcService): int
     {
         $minAge = (int) $this->option('min-age');
         $dryRun = $this->option('dry-run');
@@ -584,11 +623,11 @@ class PmClaimPositionCommand extends Command
                     $this->line("[" . ($index + 1) . "/" . count($claimablePositions) . "] 领取: " . ($position['title'] ?? 'Unknown') . " - $" . number_format($position['currentValue'], 2));
 
                     try {
-                        $result = $this->claimPosition($wallet, $position, $resolver);
+                        $result = $this->claimPosition($wallet, $position, $resolver, $rpcService);
 
                         if ($result['success']) {
                             $totalClaimed++;
-                            $this->info("✅ 成功 - TX: " . $result['tx_hash']);
+                            $this->info("✅ 成功（链上执行成功且余额校验通过）- TX: " . $result['tx_hash']);
                         } else {
                             $totalFailed++;
                             $this->error("❌ 失败: " . ($result['error'] ?? 'Unknown'));

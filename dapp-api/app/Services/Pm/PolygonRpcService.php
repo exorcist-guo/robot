@@ -89,6 +89,37 @@ class PolygonRpcService
         return is_array($result) ? $result : null;
     }
 
+    public function receiptStatusSucceeded(?array $receipt): bool
+    {
+        return $this->normalizeReceiptStatus($receipt['status'] ?? null) === 1;
+    }
+
+    public function normalizeReceiptStatus(mixed $value): ?int
+    {
+        if (is_int($value)) {
+            return $value;
+        }
+
+        if (!is_string($value)) {
+            return null;
+        }
+
+        $value = trim($value);
+        if ($value === '') {
+            return null;
+        }
+
+        if (preg_match('/^0x[0-9a-f]+$/i', $value) === 1) {
+            return (int) hexdec(substr($value, 2));
+        }
+
+        if (ctype_digit($value)) {
+            return (int) $value;
+        }
+
+        return null;
+    }
+
     public function rpcQuantityToInt(mixed $value): int
     {
         if (!is_string($value) || $value === '') {

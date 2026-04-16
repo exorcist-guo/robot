@@ -126,12 +126,7 @@ class PolymarketTradingService
             }
 
             $price = BigDecimal::of($bookPrice);
-            $diff = $price->minus($leader)->abs();
-            $bps = (int) $diff
-                ->dividedBy($leader, 8, RoundingMode::HALF_UP)
-                ->multipliedBy('10000')
-                ->toScale(0, RoundingMode::HALF_UP)
-                ->__toString();
+            $bps = $this->calculateAdverseSlippageBps($side, $leader, $price);
 
             return [
                 'passed' => $bps <= $maxSlippageBps,
@@ -154,12 +149,7 @@ class PolymarketTradingService
             }
 
             $bookPrice = BigDecimal::of($best);
-            $diff = $bookPrice->minus($leader)->abs();
-            $bps = (int) $diff
-                ->dividedBy($leader, 8, RoundingMode::HALF_UP)
-                ->multipliedBy('10000')
-                ->toScale(0, RoundingMode::HALF_UP)
-                ->__toString();
+            $bps = $this->calculateAdverseSlippageBps($side, $leader, $bookPrice);
 
             return [
                 'passed' => $bps <= $maxSlippageBps,
@@ -190,12 +180,7 @@ class PolymarketTradingService
         }
 
         $bookPrice = BigDecimal::of($best);
-        $diff = $bookPrice->minus($leader)->abs();
-        $bps = (int) $diff
-            ->dividedBy($leader, 8, RoundingMode::HALF_UP)
-            ->multipliedBy('10000')
-            ->toScale(0, RoundingMode::HALF_UP)
-            ->__toString();
+        $bps = $this->calculateAdverseSlippageBps($side, $leader, $bookPrice);
 
         return [
             'passed' => $bps <= $maxSlippageBps,
@@ -203,6 +188,25 @@ class PolymarketTradingService
             'slippage_bps' => $bps,
             'is_marketable' => $isMarketable,
         ];
+    }
+
+    private function calculateAdverseSlippageBps(string $side, BigDecimal $leaderPrice, BigDecimal $bookPrice): int
+    {
+        $adverseDiff = match (strtoupper($side)) {
+            self::SIDE_BUY => $bookPrice->isGreaterThan($leaderPrice)
+                ? $bookPrice->minus($leaderPrice)
+                : BigDecimal::zero(),
+            self::SIDE_SELL => $bookPrice->isLessThan($leaderPrice)
+                ? $leaderPrice->minus($bookPrice)
+                : BigDecimal::zero(),
+            default => $bookPrice->minus($leaderPrice)->abs(),
+        };
+
+        return (int) $adverseDiff
+            ->dividedBy($leaderPrice, 8, RoundingMode::HALF_UP)
+            ->multipliedBy('10000')
+            ->toScale(0, RoundingMode::HALF_UP)
+            ->__toString();
     }
 
     /**
@@ -692,6 +696,7 @@ class PolymarketTradingService
 
         $feeResp = $client->clob()->server()->getFeeRate($tokenId);
         $book = $this->factory->makeReadClient()->clob()->book()->get($tokenId);
+        $isNegRisk = (bool) ($book['neg_risk'] ?? false);
         $defaultFeeRateBps = (string) config('pm.default_fee_rate_bps', '1000');
         $makerFeeRateBps = (string) config('pm.maker_fee_rate_bps', '1000');
         $takerFeeRateBps = (string) config('pm.taker_fee_rate_bps', '1000');
@@ -716,6 +721,10 @@ class PolymarketTradingService
         $amounts = $this->orderSigner->makeAmounts($side, $price, $size);
         $orderSide = $this->orderSigner->sideToInt($side);
 
+        $verifyingContract = $isNegRisk
+            ? strtolower((string) config('pm.neg_risk_exchange_contract'))
+            : strtolower((string) config('pm.exchange_contract'));
+
         $order = [
             'salt' => $salt,
             'maker' => $funder,
@@ -729,6 +738,7 @@ class PolymarketTradingService
             'feeRateBps' => $feeRateBps,
             'side' => $orderSide,
             'signatureType' => $signatureType,
+            'verifyingContract' => $verifyingContract,
         ];
 
         $order['signature'] = $this->orderSigner->sign($order, $privateKey);

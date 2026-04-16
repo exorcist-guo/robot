@@ -180,8 +180,7 @@ class PolymarketClaimService
             try {
                 $receipt = $this->getTransactionReceipt($txHash);
                 if ($receipt !== null) {
-                    // status = 0x1 表示成功，0x0 表示失败
-                    return ($receipt['status'] ?? '0x0') === '0x1';
+                    return $this->receiptStatusSucceeded($receipt);
                 }
             } catch (\Exception $e) {
                 // 忽略查询错误，继续重试
@@ -212,6 +211,37 @@ class PolymarketClaimService
         } catch (\Exception $e) {
             return null;
         }
+    }
+
+    public function receiptStatusSucceeded(?array $receipt): bool
+    {
+        return $this->normalizeReceiptStatus($receipt['status'] ?? null) === 1;
+    }
+
+    public function normalizeReceiptStatus(mixed $value): ?int
+    {
+        if (is_int($value)) {
+            return $value;
+        }
+
+        if (!is_string($value)) {
+            return null;
+        }
+
+        $value = trim($value);
+        if ($value === '') {
+            return null;
+        }
+
+        if (preg_match('/^0x[0-9a-f]+$/i', $value) === 1) {
+            return (int) hexdec(substr($value, 2));
+        }
+
+        if (ctype_digit($value)) {
+            return (int) $value;
+        }
+
+        return null;
     }
 
     private function encodeRedeemPositionsCalldata(string $collateralToken, string $parentCollectionId, string $conditionId, array $indexSets): string

@@ -147,9 +147,7 @@ class IntentExecutionPrecheckService
             return $this->failure('daily_limit_exceeded', ['risk_snapshot' => $riskSnapshot]);
         }
 
-        $slippageAnchorPrice = $copyTask && $copyTask->mode === \App\Models\Pm\PmCopyTask::MODE_TAIL_SWEEP
-            ? $executionPrice
-            : $leaderPrice;
+        $slippageAnchorPrice = $executionPrice;
         $slippage = $this->trading->evaluateSlippage(
             (string) $intent->token_id,
             $side,

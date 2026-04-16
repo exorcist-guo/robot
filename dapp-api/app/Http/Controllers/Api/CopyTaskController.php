@@ -62,11 +62,11 @@ class CopyTaskController extends Controller
                 'status' => $t->status,
                 'mode' => $t->mode,
                 'ratio_bps' => $t->ratio_bps,
-                'min_usdc' => (string) $t->min_usdc,
-                'max_usdc' => (string) $t->max_usdc,
+                'min_usdc' => $t->min_usdc / 1000000,
+                'max_usdc' => $t->max_usdc / 1000000,
                 'max_slippage_bps' => $t->max_slippage_bps,
                 'allow_partial_fill' => (bool) $t->allow_partial_fill,
-                'daily_max_usdc' => $t->daily_max_usdc === null ? null : (string) $t->daily_max_usdc,
+                'daily_max_usdc' => $t->daily_max_usdc === null ? null : ($t->daily_max_usdc / 1000000),
                 'tail_order_usdc' => $t->tail_order_usdc / 1000000,
                 'tail_trigger_amount' => $t->tail_trigger_amount,
                 'tail_time_limit_seconds' => $t->tail_time_limit_seconds,
@@ -135,10 +135,10 @@ class CopyTaskController extends Controller
             $fields['ratio_bps'] = $ratioBps;
         }
         if (isset($fields['min_usdc'])) {
-            $fields['min_usdc'] = max(0, (int) $fields['min_usdc']);
+            $fields['min_usdc'] = max(0, (int) round(((float) $fields['min_usdc']) * 1000000));
         }
         if (isset($fields['max_usdc'])) {
-            $fields['max_usdc'] = max(0, (int) $fields['max_usdc']);
+            $fields['max_usdc'] = max(0, (int) round(((float) $fields['max_usdc']) * 1000000));
         }
 
         $task->fill(array_merge($fields, $this->normalizeCommonRiskFieldsForPatch($request, true)));
@@ -192,8 +192,8 @@ class CopyTaskController extends Controller
     {
         $leaderId = (int) $request->input('leader_id', 0);
         $ratioBps = (int) $request->input('ratio_bps', 10000);
-        $minUsdc = (int) $request->input('min_usdc', 0);
-        $maxUsdc = (int) $request->input('max_usdc', 0);
+        $minUsdc = max(0, (int) round(((float) $request->input('min_usdc', 0)) * 1000000));
+        $maxUsdc = max(0, (int) round(((float) $request->input('max_usdc', 0)) * 1000000));
 
         if ($leaderId <= 0) {
             return $this->error('leader_id 必填');
@@ -376,7 +376,7 @@ class CopyTaskController extends Controller
         if ($allowNullDailyMaxUsdc && ($dailyMaxUsdc === null || $dailyMaxUsdc === '')) {
             $dailyMaxUsdc = null;
         } else {
-            $dailyMaxUsdc = max(0, (int) $dailyMaxUsdc);
+            $dailyMaxUsdc = max(0, (int) round(((float) $dailyMaxUsdc) * 1000000));
         }
 
         $fields['daily_max_usdc'] = $dailyMaxUsdc;

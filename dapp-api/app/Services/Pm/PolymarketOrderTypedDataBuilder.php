@@ -40,7 +40,7 @@ class PolymarketOrderTypedDataBuilder
                 'name' => 'Polymarket CTF Exchange',
                 'version' => '1',
                 'chainId' => (int) config('pm.chain_id', 137),
-                'verifyingContract' => (string) config('pm.exchange_contract'),
+                'verifyingContract' => strtolower((string) ($order['verifyingContract'] ?? config('pm.exchange_contract'))),
             ],
             'message' => [
                 'salt' => (string) $order['salt'],

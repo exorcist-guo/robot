@@ -67,7 +67,7 @@ class PlaceOrderDirectly extends Command
         $tasks = PmCopyTask::query()
             ->where('mode', PmCopyTask::MODE_TAIL_SWEEP)
             ->where('status', 1)
-            ->where('id',12)
+            ->where('id',6)
             ->get([
                 'id',
                 'member_id',
