@@ -96,6 +96,7 @@ class PmPollLeaderTradesCommand extends Command
                 continue;
             }
 
+            // var_dump(date('Y-m-d H:i:s',$normalized['traded_at']));
             $model = PmLeaderTrade::updateOrCreate(
                 ['trade_id' => $normalized['trade_id']],
                 array_merge($normalized, ['leader_id' => $leader->id])

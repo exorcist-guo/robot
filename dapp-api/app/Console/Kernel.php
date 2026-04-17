@@ -4,11 +4,13 @@ namespace App\Console;
 
 use App\Console\Commands\BnbHealthCheckCommand;
 use App\Console\Commands\PmApproveWalletCommand;
+use App\Console\Commands\PmBacktestTailSweepCommand;
 use App\Console\Commands\PmDebugOrderIntentCommand;
 use App\Console\Commands\PmPollLeaderTradesCommand;
 use App\Console\Commands\PmLossOrderAvgPriceCommand;
 use App\Console\Commands\PmMarketInfoDaemonCommand;
 use App\Console\Commands\PmSyncOrderSettlementCommand;
+use App\Console\Commands\PmSyncLeaderboardStatsCommand;
 use App\Console\Commands\PmTailSweepPriceDaemonCommand;
 use App\Console\Commands\PmValidateSetupCommand;
 use App\Console\Commands\TestCommand;
@@ -21,11 +23,13 @@ class Kernel extends ConsoleKernel
         TestCommand::class,
         BnbHealthCheckCommand::class,
         PmApproveWalletCommand::class,
+        PmBacktestTailSweepCommand::class,
         PmDebugOrderIntentCommand::class,
         PmLossOrderAvgPriceCommand::class,
         PmPollLeaderTradesCommand::class,
         PmMarketInfoDaemonCommand::class,
         PmSyncOrderSettlementCommand::class,
+        PmSyncLeaderboardStatsCommand::class,
         PmTailSweepPriceDaemonCommand::class,
         PmValidateSetupCommand::class,
     ];
@@ -46,6 +50,11 @@ class Kernel extends ConsoleKernel
         // 每小时扫描所有钱包并自动领取奖励（1小时以上的订单）
         $schedule->command('pm:claim-position --scan-all --min-age=3600')
         ->hourly()
+        ->withoutOverlapping();
+
+        // 每 6 小时同步排行榜用户、成交记录与统计
+        $schedule->command('pm:sync-leaderboard-stats')
+        ->everySixHours()
         ->withoutOverlapping();
 
     }

@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Dcat\Admin\Traits\HasDateTimeFormatter;
 
 /**
- *
+ * 
  *
  * @property int $id 订单主键 ID
  * @property int $order_intent_id 关联的下单意图 ID

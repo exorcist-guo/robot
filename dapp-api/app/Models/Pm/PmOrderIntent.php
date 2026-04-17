@@ -51,6 +51,20 @@ use Dcat\Admin\Traits\HasDateTimeFormatter;
  * @method static \Illuminate\Database\Eloquent\Builder|PmOrderIntent whereTargetUsdc($value)
  * @method static \Illuminate\Database\Eloquent\Builder|PmOrderIntent whereTokenId($value)
  * @method static \Illuminate\Database\Eloquent\Builder|PmOrderIntent whereUpdatedAt($value)
+ * @property string|null $skip_category
+ * @property \Illuminate\Support\Carbon|null $processing_started_at
+ * @property \Illuminate\Support\Carbon|null $processed_at
+ * @property string $execution_mode
+ * @property string|null $execution_stage
+ * @property array|null $decision_payload
+ * @property string|null $price_time_limit
+ * @method static \Illuminate\Database\Eloquent\Builder|PmOrderIntent whereDecisionPayload($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|PmOrderIntent whereExecutionMode($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|PmOrderIntent whereExecutionStage($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|PmOrderIntent wherePriceTimeLimit($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|PmOrderIntent whereProcessedAt($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|PmOrderIntent whereProcessingStartedAt($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|PmOrderIntent whereSkipCategory($value)
  * @mixin \Eloquent
  */
 class PmOrderIntent extends Model

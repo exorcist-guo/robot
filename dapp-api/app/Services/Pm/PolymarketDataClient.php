@@ -4,6 +4,7 @@ namespace App\Services\Pm;
 
 use Brick\Math\BigDecimal;
 use Brick\Math\RoundingMode;
+use Carbon\Carbon;
 use GuzzleHttp\Client;
 
 class PolymarketDataClient
@@ -31,11 +32,205 @@ class PolymarketDataClient
                 'limit' => $limit,
                 'offset' => $offset,
             ],
+            'headers' => [
+                'User-Agent' => 'Mozilla/5.0',
+                'Accept' => 'application/json',
+            ],
         ]);
 
         $json = json_decode($res->getBody()->getContents(), true);
         return is_array($json) ? array_values($json) : [];
     }
+
+    /**
+     * @return array<int, array<string,mixed>>
+     */
+    public function getPositionsByUser(string $user): array
+    {
+        $limit = 100;
+        $offset = 0;
+        $all = [];
+
+        while (true) {
+            $res = $this->client->get('positions', [
+                'query' => [
+                    'user' => $user,
+                    'limit' => $limit,
+                    'offset' => $offset,
+                ],
+                'headers' => [
+                    'User-Agent' => 'Mozilla/5.0',
+                    'Accept' => 'application/json',
+                ],
+            ]);
+
+            $json = json_decode($res->getBody()->getContents(), true);
+            $items = is_array($json) ? array_values($json) : [];
+            if ($items === []) {
+                break;
+            }
+
+            $all = array_merge($all, $items);
+
+            if (count($items) < $limit) {
+                break;
+            }
+
+            $offset += $limit;
+            if ($offset > 3000) {
+                break;
+            }
+        }
+
+        return $all;
+    }
+
+    /**
+     * @return array<int, array<string,mixed>>
+     */
+    public function getMarketPositions(string $market, ?string $user = null): array
+    {
+        $query = [
+            'market' => $market,
+        ];
+        if ($user !== null && trim($user) !== '') {
+            $query['user'] = $user;
+        }
+
+        $res = $this->client->get('v1/market-positions', [
+            'query' => $query,
+            'headers' => [
+                'User-Agent' => 'Mozilla/5.0',
+                'Accept' => 'application/json',
+            ],
+        ]);
+
+        $json = json_decode($res->getBody()->getContents(), true);
+        return is_array($json) ? array_values($json) : [];
+    }
+
+    /**
+     * @return array<int,array<string,mixed>>
+     */
+    public function getLeaderboard(string $window = 'week', int $limit = 30): array
+    {
+        $window = strtolower(trim($window));
+        $paths = match ($window) {
+            'month', 'monthly' => ['v1/leaderboard/month', 'v1/leaderboard?window=month', 'v1/leaderboard'],
+            default => ['v1/leaderboard?window=week', 'v1/leaderboard'],
+        };
+
+        foreach ($paths as $path) {
+            try {
+                $res = $this->client->get($path, [
+                    'query' => [
+                        'limit' => $limit,
+                    ],
+                    'headers' => [
+                        'User-Agent' => 'Mozilla/5.0',
+                        'Accept' => 'application/json',
+                    ],
+                ]);
+
+                $json = json_decode($res->getBody()->getContents(), true);
+                if (is_array($json)) {
+                    return array_values($json);
+                }
+            } catch (\Throwable) {
+                continue;
+            }
+        }
+
+        throw new \RuntimeException('leaderboard 接口不可用: ' . $window);
+    }
+
+    /**
+     * @param array<string,mixed> $entry
+     * @return array<string,mixed>
+     */
+    public function normalizeLeaderboardEntry(array $entry, string $window): array
+    {
+        return [
+            'address' => strtolower((string) ($entry['proxyWallet'] ?? $entry['address'] ?? '')),
+            'proxy_wallet' => strtolower((string) ($entry['proxyWallet'] ?? '')),
+            'username' => (string) ($entry['userName'] ?? ''),
+            'x_username' => (string) ($entry['xUsername'] ?? ''),
+            'profile_image' => (string) ($entry['profileImage'] ?? ''),
+            'verified_badge' => (bool) ($entry['verifiedBadge'] ?? false),
+            'rank' => (int) ($entry['rank'] ?? 0),
+            'volume' => (string) ($entry['vol'] ?? '0'),
+            'pnl' => (string) ($entry['pnl'] ?? '0'),
+            'window' => $window,
+            'raw' => $entry,
+        ];
+    }
+
+    /**
+     * @return array<int, array<string,mixed>>
+     */
+    public function getTradesByUserInLastDays(string $user, int $days = 30, int $limit = 100, int $offset = 0): array
+    {
+        $items = $this->getTradesByUser($user, $limit, $offset);
+        $cutoff = Carbon::now()->subDays($days)->timestamp;
+
+        return array_values(array_filter($items, function (array $trade) use ($cutoff) {
+            $time = $trade['time'] ?? $trade['timestamp'] ?? null;
+            if ($time === null) {
+                return true;
+            }
+
+            if (is_numeric($time)) {
+                return (int) $time >= $cutoff;
+            }
+
+            try {
+                return Carbon::parse((string) $time)->timestamp >= $cutoff;
+            } catch (\Throwable) {
+                return true;
+            }
+        }));
+    }
+
+    /**
+     * @param array<string,mixed> $trade
+     * @return array<string,mixed>
+     */
+    public function normalizeLeaderboardTrade(string $address, array $trade): array
+    {
+        $normalized = $this->normalizeTrade($trade);
+        $investedUsdc = (int) ($normalized['size_usdc'] ?? 0);
+        $pnlAmount = $this->decimalToUsdcAtomic($trade['cashPnl'] ?? $trade['pnl'] ?? null);
+        $pnlRatioBps = $this->decimalToBps($trade['percentPnl'] ?? $trade['roi'] ?? null);
+        $isSettled = $this->detectSettled($trade, $pnlAmount);
+        $orderStatus = $this->detectOrderStatus($trade, $isSettled);
+        $pnlStatus = $pnlAmount === null
+            ? ($isSettled ? 'settled' : 'pending')
+            : ($pnlAmount > 0 ? 'profit' : ($pnlAmount < 0 ? 'loss' : 'flat'));
+
+        return [
+            'address' => strtolower($address),
+            'external_trade_id' => (string) $normalized['trade_id'],
+            'market_id' => $normalized['market_id'],
+            'token_id' => $normalized['token_id'],
+            'title' => (string) ($trade['title'] ?? ''),
+            'slug' => (string) ($trade['slug'] ?? ''),
+            'side' => (string) $normalized['side'],
+            'outcome' => (string) ($trade['outcome'] ?? ''),
+            'price' => $normalized['price'],
+            'size' => (string) ($trade['size'] ?? $trade['amount'] ?? $trade['shares'] ?? '0'),
+            'invested_amount_usdc' => $investedUsdc,
+            'pnl_amount_usdc' => $pnlAmount,
+            'pnl_status' => $pnlStatus,
+            'pnl_ratio_bps' => $pnlRatioBps,
+            'order_status' => $orderStatus,
+            'is_settled' => $isSettled,
+            'traded_at' => $this->normalizeTradeTime($trade),
+            'settled_at' => $isSettled ? $this->normalizeTradeTime($trade) : null,
+            'last_synced_at' => now(),
+            'raw' => $trade,
+        ];
+    }
+
 
     /**
      * 统一整理 trade 字段，适配后续 leader 跟单逻辑。
@@ -80,6 +275,76 @@ class PolymarketDataClient
             ->toScale(0, RoundingMode::DOWN);
 
         return (int) $usdc->__toString();
+    }
+
+    private function decimalToUsdcAtomic(mixed $value): ?int
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        $string = (string) $value;
+        if (!preg_match('/^-?\d+(\.\d+)?$/', $string)) {
+            return null;
+        }
+
+        return (int) BigDecimal::of($string)
+            ->multipliedBy('1000000')
+            ->toScale(0, RoundingMode::DOWN)
+            ->__toString();
+    }
+
+    private function decimalToBps(mixed $value): ?int
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        $string = (string) $value;
+        if (!preg_match('/^-?\d+(\.\d+)?$/', $string)) {
+            return null;
+        }
+
+        return (int) BigDecimal::of($string)
+            ->multipliedBy('100')
+            ->toScale(0, RoundingMode::HALF_UP)
+            ->__toString();
+    }
+
+    private function detectSettled(array $trade, ?int $pnlAmount): bool
+    {
+        if (isset($trade['redeemable'])) {
+            return (bool) $trade['redeemable'];
+        }
+
+        return $pnlAmount !== null;
+    }
+
+    private function detectOrderStatus(array $trade, bool $isSettled): string
+    {
+        if (!empty($trade['status']) && is_string($trade['status'])) {
+            return strtolower($trade['status']);
+        }
+
+        return $isSettled ? 'settled' : 'open';
+    }
+
+    private function normalizeTradeTime(array $trade): ?Carbon
+    {
+        $time = $trade['time'] ?? $trade['timestamp'] ?? $trade['created_at'] ?? $trade['createdAt'] ?? null;
+        if ($time === null) {
+            return null;
+        }
+
+        if (is_numeric($time)) {
+            return Carbon::createFromTimestamp((int) $time);
+        }
+
+        try {
+            return Carbon::parse((string) $time);
+        } catch (\Throwable) {
+            return null;
+        }
     }
 
     /**
