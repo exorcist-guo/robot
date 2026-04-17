@@ -20,6 +20,8 @@ class PmOptimizeTailSweepCommand extends Command
 
     public function handle(PmBacktestTailSweepCommand $backtestCommand): int
     {
+        @ini_set('memory_limit', '-1');
+
         $period = (string) $this->argument('period');
         if (!in_array($period, ['day', 'week', 'month'], true)) {
             $this->error('period 仅支持 day|week|month');
