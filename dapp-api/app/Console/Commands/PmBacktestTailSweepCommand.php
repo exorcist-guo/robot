@@ -50,7 +50,7 @@ class PmBacktestTailSweepCommand extends Command
             return self::FAILURE;
         }
 
-        $result = $this->runMode2($symbol, $startAt, $endAt, $amount);
+        $result = $this->backtestMode2($symbol, $startAt, $endAt, $amount, null, (bool) $this->option('detail'));
         $this->printMode2($result);
 
         return self::SUCCESS;
@@ -181,9 +181,9 @@ class PmBacktestTailSweepCommand extends Command
         ];
     }
 
-    private function runMode2(string $symbol, Carbon $startAt, Carbon $endAt, string $amount): array
+    public function backtestMode2(string $symbol, Carbon $startAt, Carbon $endAt, string $amount, ?array $config = null, bool $detail = false): array
     {
-        $config = $this->defaultConfig()[$symbol] ?? null;
+        $config = $config ?? ($this->defaultConfig()[$symbol] ?? null);
         if (!$config) {
             return [
                 'mode' => '2',
@@ -206,52 +206,8 @@ class PmBacktestTailSweepCommand extends Command
             ];
         }
 
-        $roundRows = PmTailSweepRoundOpenPrice::query()
-            ->where('symbol', $symbol)
-            ->where('round_start_at', '>=', $startAt)
-            ->where('round_start_at', '<', $endAt)
-            ->whereNotNull('round_open_price')
-            ->orderBy('round_start_at')
-            ->get(['round_start_at', 'round_end_at', 'round_open_price'])
-            ->values();
-
-        $rounds = [];
-        for ($i = 0; $i + 1 < $roundRows->count(); $i++) {
-            $current = $roundRows[$i];
-            $next = $roundRows[$i + 1];
-            $startPrice = (string) $current->round_open_price;
-            $endPrice = (string) $next->round_open_price;
-
-            if (!$this->isPositiveDecimal($startPrice) || !$this->isPositiveDecimal($endPrice) || !$current->round_end_at) {
-                continue;
-            }
-
-            $key = (string) optional($current->round_start_at)->timestamp;
-            if ($key === '') {
-                continue;
-            }
-
-            $rounds[] = [
-                'key' => $key,
-                'round_start_at' => $current->round_start_at,
-                'round_end_at' => $current->round_end_at,
-                'start_price' => $startPrice,
-                'end_price' => $endPrice,
-                'actual_direction' => $this->resolveDirection($startPrice, $endPrice),
-            ];
-        }
-
-        $snapshots = PmTailSweepMarketSnapshot::query()
-            ->where('symbol', $symbol)
-            ->where('snapshot_at', '>=', $startAt)
-            ->where('snapshot_at', '<', $endAt)
-            ->orderBy('snapshot_at')
-            ->get([
-                'snapshot_at',
-                'current_price',
-                'up_entry_price5m',
-                'down_entry_price5m',
-            ]);
+        $rounds = $this->loadMode2Rounds($symbol, $startAt, $endAt);
+        $snapshots = $this->loadMode2Snapshots($symbol, $startAt, $endAt);
 
         $details = [];
         $triggeredRounds = 0;
@@ -300,7 +256,7 @@ class PmBacktestTailSweepCommand extends Command
 
             $absDiff = $this->bcAbs($priceDiff);
             $remainingSeconds = $snapshotAt->diffInSeconds($round['round_end_at'], false);
-            if ($remainingSeconds < 0) {
+            if ($remainingSeconds < 5) {
                 continue;
             }
 
@@ -328,16 +284,21 @@ class PmBacktestTailSweepCommand extends Command
             if (!$this->isValidEntryPrice($entryPrice)) {
                 $skippedRounds++;
 
-                if ((bool) $this->option('detail')) {
+                if ($detail) {
                     $details[] = [
-                        'round_start_at' => $round['round_start_at']->toDateTimeString(),
-                        'snapshot_at' => $snapshotAt->toDateTimeString(),
-                        'price_diff' => $priceDiff,
-                        'remaining_seconds' => $remainingSeconds,
-                        'side' => $side,
-                        'entry_price' => $entryPrice === '' ? 'null' : $entryPrice,
-                        'pnl' => '0',
-                        'result' => 'skipped',
+                        '轮次开始时间' => $round['round_start_at']->toDateTimeString(),
+                        '快照时间' => $snapshotAt->toDateTimeString(),
+                        '开始价' => $round['start_price'],
+                        '结束价' => $round['end_price'],
+                        '实际方向' => $round['actual_direction'],
+                        '价差' => $priceDiff,
+                        '剩余秒数' => $remainingSeconds,
+                        '下单方向' => $side,
+                        '入场价' => $entryPrice === '' ? 'null' : $entryPrice,
+                        '命中规则' => $matchedRule[0].'/'.$matchedRule[1],
+                        '买入份额' => '0',
+                        '盈亏' => '0',
+                        '结果' => 'skipped',
                     ];
                 }
 
@@ -360,17 +321,21 @@ class PmBacktestTailSweepCommand extends Command
 
             $netProfit = $this->bcAdd($netProfit, $pnl, 8);
 
-            if ((bool) $this->option('detail')) {
+            if ($detail) {
                 $details[] = [
-                    'round_start_at' => $round['round_start_at']->toDateTimeString(),
-                    'snapshot_at' => $snapshotAt->toDateTimeString(),
-                    'price_diff' => $priceDiff,
-                    'remaining_seconds' => $remainingSeconds,
-                    'side' => $side,
-                    'entry_price' => $entryPrice,
-                    'shares' => $shares,
-                    'pnl' => $pnl,
-                    'result' => $isWin ? 'win' : 'lose',
+                    '轮次开始时间' => $round['round_start_at']->toDateTimeString(),
+                    '快照时间' => $snapshotAt->toDateTimeString(),
+                    '开始价' => $round['start_price'],
+                    '结束价' => $round['end_price'],
+                    '实际方向' => $round['actual_direction'],
+                    '价差' => $priceDiff,
+                    '剩余秒数' => $remainingSeconds,
+                    '下单方向' => $side,
+                    '入场价' => $entryPrice,
+                    '命中规则' => $matchedRule[0].'/'.$matchedRule[1],
+                    '买入份额' => $shares,
+                    '盈亏' => $pnl,
+                    '结果' => $isWin ? 'win' : 'lose',
                 ];
             }
         }
@@ -395,6 +360,62 @@ class PmBacktestTailSweepCommand extends Command
             'message' => null,
         ];
     }
+
+    private function loadMode2Rounds(string $symbol, Carbon $startAt, Carbon $endAt): array
+    {
+        $roundRows = PmTailSweepRoundOpenPrice::query()
+            ->where('symbol', $symbol)
+            ->where('round_start_at', '>=', $startAt)
+            ->where('round_start_at', '<', $endAt)
+            ->whereNotNull('round_open_price')
+            ->orderBy('round_start_at')
+            ->get(['round_start_at', 'round_end_at', 'round_open_price'])
+            ->values();
+
+        $rounds = [];
+        for ($i = 0; $i + 1 < $roundRows->count(); $i++) {
+            $current = $roundRows[$i];
+            $next = $roundRows[$i + 1];
+            $startPrice = (string) $current->round_open_price;
+            $endPrice = (string) $next->round_open_price;
+
+            if (!$this->isPositiveDecimal($startPrice) || !$this->isPositiveDecimal($endPrice) || !$current->round_end_at) {
+                continue;
+            }
+
+            $key = (string) optional($current->round_start_at)->timestamp;
+            if ($key === '') {
+                continue;
+            }
+
+            $rounds[] = [
+                'key' => $key,
+                'round_start_at' => $current->round_start_at,
+                'round_end_at' => $current->round_end_at,
+                'start_price' => $startPrice,
+                'end_price' => $endPrice,
+                'actual_direction' => bccomp($endPrice, $startPrice, 8) === 1 ? 'up' : 'down',
+            ];
+        }
+
+        return $rounds;
+    }
+
+    private function loadMode2Snapshots(string $symbol, Carbon $startAt, Carbon $endAt)
+    {
+        return PmTailSweepMarketSnapshot::query()
+            ->where('symbol', $symbol)
+            ->where('snapshot_at', '>=', $startAt)
+            ->where('snapshot_at', '<', $endAt)
+            ->orderBy('snapshot_at')
+            ->get([
+                'snapshot_at',
+                'current_price',
+                'up_entry_price5m',
+                'down_entry_price5m',
+            ]);
+    }
+
 
     private function printMode1(array $result): void
     {
@@ -438,6 +459,8 @@ class PmBacktestTailSweepCommand extends Command
             ['标的', $result['symbol']],
             ['开始时间', $result['window_start']],
             ['结束时间', $result['window_end']],
+            ['每轮最多下单', '1次'],
+            ['最小剩余时间', '5秒'],
             ['扫描快照数', $result['scanned_snapshots']],
             ['有效轮次', $result['valid_rounds']],
             ['触发轮次', $result['triggered_rounds']],
@@ -452,13 +475,10 @@ class PmBacktestTailSweepCommand extends Command
         ]);
 
         if ($result['details'] !== []) {
-            $headers = ['round_start_at', 'snapshot_at', 'price_diff', 'remaining_seconds', 'side', 'entry_price', 'pnl', 'result'];
-            $hasShares = isset($result['details'][0]['shares']);
-            if ($hasShares) {
-                $headers = ['round_start_at', 'snapshot_at', 'price_diff', 'remaining_seconds', 'side', 'entry_price', 'shares', 'pnl', 'result'];
-            }
-
-            $this->table($headers, $result['details']);
+            $this->table(
+                ['轮次开始时间', '快照时间', '开始价', '结束价', '实际方向', '价差', '剩余秒数', '下单方向', '入场价', '命中规则', '买入份额', '盈亏', '结果'],
+                $result['details']
+            );
         }
     }
 
@@ -480,11 +500,6 @@ class PmBacktestTailSweepCommand extends Command
         }
 
         throw new \InvalidArgumentException('period 仅支持 day|week|month');
-    }
-
-    private function resolveDirection(string $startPrice, string $endPrice): string
-    {
-        return bccomp($startPrice, $endPrice, 8) === 1 ? 'up' : 'down';
     }
 
     private function defaultConfig(): array
