@@ -73,7 +73,7 @@ class PmBacktestTailSweepCommand extends Command
         $sampleCount = 0;
         $prediction = null;
         $baseBet = '5';
-        $maxLoseResetLimit = 6;
+        $maxLoseResetLimit = 5;
         $resetLoseCount = 0;
         $currentBet = $baseBet;
         $maxBet = $baseBet;
