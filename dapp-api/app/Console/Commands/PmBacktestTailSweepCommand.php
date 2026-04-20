@@ -14,6 +14,7 @@ class PmBacktestTailSweepCommand extends Command
         {--mode=1 : 仅支持 1 或 2}
         {--symbol=btc/usd : 默认标的}
         {--amount=20 : 模式二买入金额，默认 20 USDC}
+        {--min-predict-diff=10 : 模式一最小预测价差，支持单值或区间如 10-20}
         {--detail : 输出明细}';
 
     protected $description = '使用历史数据回测 tail sweep 策略';
@@ -37,7 +38,59 @@ class PmBacktestTailSweepCommand extends Command
         }
 
         if ($mode === '1') {
-            $result = $this->runMode1($symbol, $startAt, $endAt);
+            $minPredictDiffOption = trim((string) $this->option('min-predict-diff'));
+            if (preg_match('/^(\d+)-(\d+)(?::(\d+))?$/', $minPredictDiffOption, $matches) === 1) {
+                $startDiff = (int) $matches[1];
+                $endDiff = (int) $matches[2];
+                $step = isset($matches[3]) && $matches[3] !== '' ? (int) $matches[3] : 1;
+                if ($startDiff > $endDiff) {
+                    $this->error('min-predict-diff 区间格式错误，开始值不能大于结束值');
+
+                    return self::FAILURE;
+                }
+
+                if ($step <= 0) {
+                    $this->error('min-predict-diff 步长必须大于 0');
+
+                    return self::FAILURE;
+                }
+
+                $results = [];
+                $best = null;
+                for ($diff = $startDiff; $diff <= $endDiff; $diff += $step) {
+                    $item = $this->runMode1($symbol, $startAt, $endAt, (string) $diff);
+                    $results[] = $item;
+                    if ($best === null || $this->compareNumericString((string) $item['net_profit'], (string) $best['net_profit']) === 1) {
+                        $best = $item;
+                    }
+                    $this->line('minPredictDiff='.$diff.' => 净盈利='.$item['net_profit'].' 总投资金额='.$item['total_stake'].' 净盈利占比='.$item['profit_ratio'].' 胜率='.$item['win_rate']);
+                }
+
+                $this->table(['minPredictDiff', '净盈利', '总投资金额', '净盈利占比', '胜率', '有效样本'], array_map(static function (array $item): array {
+                    return [
+                        'minPredictDiff' => $item['min_predict_diff'],
+                        '净盈利' => $item['net_profit'],
+                        '总投资金额' => $item['total_stake'],
+                        '净盈利占比' => $item['profit_ratio'],
+                        '胜率' => $item['win_rate'],
+                        '有效样本' => $item['valid_samples'],
+                    ];
+                }, $results));
+
+                if ($best !== null) {
+                    $this->line('最佳 minPredictDiff='.$best['min_predict_diff'].' => 净盈利='.$best['net_profit'].' 总投资金额='.$best['total_stake'].' 净盈利占比='.$best['profit_ratio']);
+                }
+
+                return self::SUCCESS;
+            }
+
+            if (!$this->isPositiveIntString($minPredictDiffOption)) {
+                $this->error('min-predict-diff 必须是正整数，或区间如 10-20 / 10-20:5');
+
+                return self::FAILURE;
+            }
+
+            $result = $this->runMode1($symbol, $startAt, $endAt, $minPredictDiffOption);
             $this->printMode1($result);
 
             return self::SUCCESS;
@@ -56,7 +109,7 @@ class PmBacktestTailSweepCommand extends Command
         return self::SUCCESS;
     }
 
-    private function runMode1(string $symbol, Carbon $startAt, Carbon $endAt): array
+    private function runMode1(string $symbol, Carbon $startAt, Carbon $endAt, string $minPredictDiff = '10'): array
     {
         $rows = PmTailSweepRoundOpenPrice::query()
             ->where('symbol', $symbol)
@@ -73,7 +126,7 @@ class PmBacktestTailSweepCommand extends Command
         $sampleCount = 0;
         $prediction = null;
         $baseBet = '5';
-        $maxLoseResetLimit = 5;
+        $maxLoseResetLimit = 6;
         $resetLoseCount = 0;
         $currentBet = $baseBet;
         $maxBet = $baseBet;
@@ -84,7 +137,6 @@ class PmBacktestTailSweepCommand extends Command
         $currentFundingNeed = '0';
         $maxFundingNeed = '0';
         $loseStreakStats = [];
-        $minPredictDiff = '10';
 
         for ($i = 1; $i < $rows->count(); $i++) {
             $prevOpen = (string) $rows[$i - 1]->round_open_price;
@@ -185,6 +237,7 @@ class PmBacktestTailSweepCommand extends Command
             'window_start' => $startAt->toDateTimeString(),
             'window_end' => $endAt->toDateTimeString(),
             'base_bet' => $baseBet,
+            'min_predict_diff' => $minPredictDiff,
             'total_rounds' => $rows->count(),
             'valid_samples' => $sampleCount,
             'win_count' => $winCount,
@@ -448,7 +501,7 @@ class PmBacktestTailSweepCommand extends Command
             ['开始时间', $result['window_start']],
             ['结束时间', $result['window_end']],
             ['基础投注', $result['base_bet']],
-            ['最小预测价差', '10'],
+            ['最小预测价差', $result['min_predict_diff']],
             ['最大连亏重置限制', $result['max_lose_reset_limit']],
             ['重置次数', $result['reset_lose_count']],
             ['总轮数', $result['total_rounds']],
@@ -557,6 +610,11 @@ class PmBacktestTailSweepCommand extends Command
         return $value;
     }
 
+    private function isPositiveIntString(string $value): bool
+    {
+        return preg_match('/^\d+$/', $value) === 1 && (int) $value > 0;
+    }
+
     private function formatPercent(int $numerator, int $denominator): string
     {
         if ($denominator <= 0) {
@@ -564,6 +622,18 @@ class PmBacktestTailSweepCommand extends Command
         }
 
         return number_format(($numerator / $denominator) * 100, 2, '.', '').'%';
+    }
+
+    private function compareNumericString(string $left, string $right): int
+    {
+        $normalizedLeft = rtrim($left, '%');
+        $normalizedRight = rtrim($right, '%');
+
+        if (preg_match('/^-?\d+(\.\d+)?$/', $normalizedLeft) === 1 && preg_match('/^-?\d+(\.\d+)?$/', $normalizedRight) === 1) {
+            return bccomp($normalizedLeft, $normalizedRight, 8);
+        }
+
+        return $left <=> $right;
     }
 
     private function formatBcPercent(string $numerator, string $denominator, int $scale = 4): string
