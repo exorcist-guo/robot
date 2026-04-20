@@ -84,7 +84,15 @@ use Dcat\Admin\Traits\HasDateTimeFormatter;
  * @method static \Illuminate\Database\Eloquent\Builder|PmCopyTask whereTokenNoId($value)
  * @method static \Illuminate\Database\Eloquent\Builder|PmCopyTask whereTokenYesId($value)
  * @property array|null $tail_price_time_config 扫尾盘价格-时间限制配置 JSON
+ * @property bool $next_round_enabled
+ * @property string|null $next_round_min_predict_diff
+ * @property int $next_round_prepare_seconds
+ * @property string|null $next_round_last_prepared_round_key
  * @method static \Illuminate\Database\Eloquent\Builder|PmCopyTask whereTailPriceTimeConfig($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|PmCopyTask whereNextRoundEnabled($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|PmCopyTask whereNextRoundMinPredictDiff($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|PmCopyTask whereNextRoundPrepareSeconds($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|PmCopyTask whereNextRoundLastPreparedRoundKey($value)
  * @mixin \Eloquent
  */
 class PmCopyTask extends Model
@@ -104,6 +112,7 @@ class PmCopyTask extends Model
         'market_end_at' => 'datetime',
         'tail_loss_stopped_at' => 'datetime',
         'tail_price_time_config' => 'array',
+        'next_round_enabled' => 'boolean',
     ];
 
     public function member(): BelongsTo

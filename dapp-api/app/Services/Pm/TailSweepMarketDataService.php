@@ -24,6 +24,11 @@ class TailSweepMarketDataService
             ? $this->getRoundStartTime15($now)
             : $this->getRoundStartTime($now);
 
+        return $this->buildRoundSlug($baseSlug, $roundStart);
+    }
+
+    public function buildRoundSlug(string $baseSlug, int $roundStart): string
+    {
         return $baseSlug.'-'.$roundStart;
     }
 
@@ -53,16 +58,24 @@ class TailSweepMarketDataService
      */
     public function resolveCurrentRoundMarket(GammaClient $gammaClient, string $currentRoundSlug): array
     {
+        return $this->resolveMarketBySlug($gammaClient, $currentRoundSlug);
+    }
+
+    /**
+     * @return array<string,mixed>
+     */
+    public function resolveMarketBySlug(GammaClient $gammaClient, string $roundSlug): array
+    {
         $store = $this->cacheStore();
-        $cacheKey = $this->marketCacheKey($currentRoundSlug);
+        $cacheKey = $this->marketCacheKey($roundSlug);
         $cached = $store->get($cacheKey);
         if (is_array($cached) && $cached !== []) {
             return $cached;
         }
 
-        $market = $gammaClient->resolveTailSweepMarket($currentRoundSlug);
+        $market = $gammaClient->resolveTailSweepMarket($roundSlug);
         if (!is_array($market) || $market === []) {
-            throw new \RuntimeException("当前轮 market 为空: {$currentRoundSlug}");
+            throw new \RuntimeException("当前轮 market 为空: {$roundSlug}");
         }
 
         $store->put(

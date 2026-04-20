@@ -73,9 +73,12 @@ class PmBacktestTailSweepCommand extends Command
         $sampleCount = 0;
         $prediction = null;
         $baseBet = '5';
+        $maxLoseResetLimit = 6;
+        $resetLoseCount = 0;
         $currentBet = $baseBet;
         $maxBet = $baseBet;
         $netProfit = '0';
+        $totalStake = '0';
         $currentLoseStreak = 0;
         $maxLoseStreak = 0;
         $currentFundingNeed = '0';
@@ -99,6 +102,7 @@ class PmBacktestTailSweepCommand extends Command
                 $sampleCount++;
                 $result = $prediction === $actualDirection ? 'win' : 'lose';
                 $betAmount = $currentBet;
+                $totalStake = $this->bcAdd($totalStake, $betAmount, 8);
                 $currentFundingNeed = $this->bcAdd($currentFundingNeed, $betAmount, 8);
                 if (bccomp($currentFundingNeed, $maxFundingNeed, 8) === 1) {
                     $maxFundingNeed = $currentFundingNeed;
@@ -120,9 +124,20 @@ class PmBacktestTailSweepCommand extends Command
                     if ($currentLoseStreak > $maxLoseStreak) {
                         $maxLoseStreak = $currentLoseStreak;
                     }
-                    $currentBet = bcmul($betAmount, '2', 8);
-                    if (bccomp($currentBet, $maxBet, 8) === 1) {
-                        $maxBet = $currentBet;
+
+                    if ($currentLoseStreak > $maxLoseResetLimit) {
+                        $resetLoseCount++;
+                        if ($currentLoseStreak > 2) {
+                            $loseStreakStats[$currentLoseStreak] = ($loseStreakStats[$currentLoseStreak] ?? 0) + 1;
+                        }
+                        $currentLoseStreak = 0;
+                        $currentFundingNeed = '0';
+                        $currentBet = $baseBet;
+                    } else {
+                        $currentBet = bcmul($betAmount, '2', 8);
+                        if (bccomp($currentBet, $maxBet, 8) === 1) {
+                            $maxBet = $currentBet;
+                        }
                     }
                 }
             }
@@ -140,9 +155,12 @@ class PmBacktestTailSweepCommand extends Command
                     '价差绝对值' => $priceDiffAbs,
                     'bet_amount' => $prediction !== null ? $betAmount : '0',
                     'result' => $result ?? 'skip',
+                    'total_stake' => $totalStake,
                     'net_profit' => $netProfit,
+                    'profit_ratio' => bccomp($totalStake, '0', 8) === 1 ? $this->formatBcPercent($netProfit, $totalStake, 4) : '0.00%',
                     'lose_streak' => $prediction !== null ? (string) $currentLoseStreak : '0',
                     'funding_need' => $prediction !== null ? $currentFundingNeed : '0',
+                    'reset_lose_count' => (string) $resetLoseCount,
                     'next_prediction' => $nextPrediction ?? 'skip',
                     'next_bet_amount' => $nextPrediction !== null ? $currentBet : '0',
                 ];
@@ -172,10 +190,14 @@ class PmBacktestTailSweepCommand extends Command
             'win_count' => $winCount,
             'lose_count' => $loseCount,
             'win_rate' => $sampleCount > 0 ? $this->formatPercent($winCount, $sampleCount) : '0.00%',
+            'total_stake' => $totalStake,
             'net_profit' => $netProfit,
+            'profit_ratio' => bccomp($totalStake, '0', 8) === 1 ? $this->formatBcPercent($netProfit, $totalStake, 4) : '0.00%',
             'max_bet_amount' => $maxBet,
             'max_lose_streak' => $maxLoseStreak,
             'max_funding_need' => $maxFundingNeed,
+            'max_lose_reset_limit' => $maxLoseResetLimit,
+            'reset_lose_count' => $resetLoseCount,
             'lose_streak_summary' => $loseStreakSummary,
             'details' => $details,
         ];
@@ -427,12 +449,16 @@ class PmBacktestTailSweepCommand extends Command
             ['结束时间', $result['window_end']],
             ['基础投注', $result['base_bet']],
             ['最小预测价差', '10'],
+            ['最大连亏重置限制', $result['max_lose_reset_limit']],
+            ['重置次数', $result['reset_lose_count']],
             ['总轮数', $result['total_rounds']],
             ['有效样本', $result['valid_samples']],
             ['赢次数', $result['win_count']],
             ['输次数', $result['lose_count']],
             ['胜率', $result['win_rate']],
+            ['总投资金额', $result['total_stake']],
             ['净盈利', $result['net_profit']],
+            ['净盈利占比', $result['profit_ratio']],
             ['最大单次投注', $result['max_bet_amount']],
             ['最大连续亏损', $result['max_lose_streak']],
             ['最大资金池', $result['max_funding_need']],
@@ -441,7 +467,7 @@ class PmBacktestTailSweepCommand extends Command
 
         if ($result['details'] !== []) {
             $this->table(
-                ['ID', '开始时间', '上一轮价格', '当前轮价格', '当前预测', '实际方向', '价差绝对值', '投注金额', '结果', '累计净盈利', '连亏次数', '资金占用', '下一轮预测', '下一轮投注'],
+                ['ID', '开始时间', '上一轮价格', '当前轮价格', '当前预测', '实际方向', '价差绝对值', '投注金额', '结果', '总投资金额', '累计净盈利', '净盈利占比', '连亏次数', '资金占用', '重置次数', '下一轮预测', '下一轮投注'],
                 $result['details']
             );
         }

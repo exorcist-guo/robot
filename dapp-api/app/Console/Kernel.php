@@ -13,6 +13,7 @@ use App\Console\Commands\PmMarketInfoDaemonCommand;
 use App\Console\Commands\PmSyncOrderSettlementCommand;
 use App\Console\Commands\PmSyncLeaderboardStatsCommand;
 use App\Console\Commands\PmTailSweepPriceDaemonCommand;
+use App\Console\Commands\PmPreplaceNextRoundOrderCommand;
 use App\Console\Commands\PmValidateSetupCommand;
 use App\Console\Commands\TestCommand;
 use Illuminate\Console\Scheduling\Schedule;
@@ -33,6 +34,7 @@ class Kernel extends ConsoleKernel
         PmSyncOrderSettlementCommand::class,
         PmSyncLeaderboardStatsCommand::class,
         PmTailSweepPriceDaemonCommand::class,
+        PmPreplaceNextRoundOrderCommand::class,
         PmValidateSetupCommand::class,
     ];
     /**
@@ -57,6 +59,11 @@ class Kernel extends ConsoleKernel
         // 每 6 小时同步排行榜用户、成交记录与统计
         $schedule->command('pm:sync-leaderboard-stats')
         ->everySixHours()
+        ->withoutOverlapping();
+
+        // 每分钟检查一次下一轮预下单机会
+        $schedule->command('pm:preplace-next-round-order --once')
+        ->everyMinute()
         ->withoutOverlapping();
 
     }
