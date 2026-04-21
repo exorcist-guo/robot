@@ -63,22 +63,23 @@ class PmBacktestTailSweepCommand extends Command
                     if ($best === null || $this->compareNumericString((string) $item['net_profit'], (string) $best['net_profit']) === 1) {
                         $best = $item;
                     }
-                    $this->line('minPredictDiff='.$diff.' => 净盈利='.$item['net_profit'].' 总投资金额='.$item['total_stake'].' 净盈利占比='.$item['profit_ratio'].' 胜率='.$item['win_rate']);
+                    $this->line('minPredictDiff='.$diff.' => 净盈利='.$item['net_profit'].' 总投资金额='.$item['total_stake'].' 净盈利占比='.$item['profit_ratio'].' 胜率='.$item['win_rate'].' 连续亏损统计='.(empty($item['lose_streak_summary']) ? '无' : implode(' , ', $item['lose_streak_summary'])));
                 }
 
-                $this->table(['minPredictDiff', '净盈利', '总投资金额', '净盈利占比', '胜率', '有效样本'], array_map(static function (array $item): array {
+                $this->table(['minPredictDiff', '净盈利', '总投资金额', '净盈利占比', '胜率', '连续亏损统计', '有效样本'], array_map(static function (array $item): array {
                     return [
                         'minPredictDiff' => $item['min_predict_diff'],
                         '净盈利' => $item['net_profit'],
                         '总投资金额' => $item['total_stake'],
                         '净盈利占比' => $item['profit_ratio'],
                         '胜率' => $item['win_rate'],
+                        '连续亏损统计' => empty($item['lose_streak_summary']) ? '无' : implode(' , ', $item['lose_streak_summary']),
                         '有效样本' => $item['valid_samples'],
                     ];
                 }, $results));
 
                 if ($best !== null) {
-                    $this->line('最佳 minPredictDiff='.$best['min_predict_diff'].' => 净盈利='.$best['net_profit'].' 总投资金额='.$best['total_stake'].' 净盈利占比='.$best['profit_ratio']);
+                    $this->line('最佳 minPredictDiff='.$best['min_predict_diff'].' => 净盈利='.$best['net_profit'].' 总投资金额='.$best['total_stake'].' 净盈利占比='.$best['profit_ratio'].' 连续亏损统计='.(empty($best['lose_streak_summary']) ? '无' : implode(' , ', $best['lose_streak_summary'])));
                 }
 
                 return self::SUCCESS;
@@ -515,7 +516,7 @@ class PmBacktestTailSweepCommand extends Command
             ['最大单次投注', $result['max_bet_amount']],
             ['最大连续亏损', $result['max_lose_streak']],
             ['最大资金池', $result['max_funding_need']],
-            ['连续亏损分布', $result['lose_streak_summary'] === [] ? '无' : implode(' , ', $result['lose_streak_summary'])],
+            ['连续亏损统计', $result['lose_streak_summary'] === [] ? '无' : implode(' , ', $result['lose_streak_summary'])],
         ]);
 
         if ($result['details'] !== []) {

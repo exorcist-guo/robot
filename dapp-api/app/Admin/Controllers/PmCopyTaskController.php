@@ -59,6 +59,9 @@ class PmCopyTaskController extends AdminController
             $grid->column('min_usdc', '最小金额')->display(fn ($value) => self::formatUsdc($value));
             $grid->column('max_usdc', '最大金额')->display(fn ($value) => self::formatUsdc($value));
             $grid->column('tail_order_usdc', '扫尾盘金额')->display(fn ($value) => self::formatUsdc($value));
+            $grid->column('next_round_enabled', '下一轮预下单')->bool();
+            $grid->column('next_round_min_predict_diff', '预测阈值')->display(fn ($value) => $value ?: '-');
+            $grid->column('next_round_prepare_seconds', '提前秒数')->display(fn ($value) => $value ? $value.' 秒' : '-');
             $grid->column('daily_max_usdc', '每日限额')->display(fn ($value) => self::formatUsdc($value));
             $grid->column('max_slippage_bps', '最大滑点')->display(fn ($value) => bcdiv((string) $value, '100', 2).'%');
             $grid->column('allow_partial_fill', '允许部分成交')->bool();
@@ -106,6 +109,10 @@ class PmCopyTaskController extends AdminController
             $show->field('min_usdc', '最小金额')->as(fn ($value) => self::formatUsdc($value));
             $show->field('max_usdc', '最大金额')->as(fn ($value) => self::formatUsdc($value));
             $show->field('tail_order_usdc', '扫尾盘金额')->as(fn ($value) => self::formatUsdc($value));
+            $show->field('next_round_enabled', '下一轮预下单')->as(fn ($value) => $value ? '是' : '否');
+            $show->field('next_round_min_predict_diff', '预测阈值');
+            $show->field('next_round_prepare_seconds', '提前秒数')->as(fn ($value) => $value ? $value.' 秒' : '-');
+            $show->field('next_round_last_prepared_round_key', '最后预下单轮次');
             $show->field('tail_trigger_amount', '触发阈值');
             $show->field('tail_time_limit_seconds', '限制时间')->as(fn ($value) => $value ? $value.' 秒' : '-');
             $show->field('tail_loss_count', '已亏损单数');
@@ -147,6 +154,10 @@ class PmCopyTaskController extends AdminController
             $form->number('min_usdc', '最小金额(1e6)')->min(0);
             $form->number('max_usdc', '最大金额(1e6)')->min(0);
             $form->number('tail_order_usdc', '扫尾盘下单金额(1e6)')->min(0);
+            $form->switch('next_round_enabled', '启用下一轮预下单')->default(0);
+            $form->text('next_round_min_predict_diff', '下一轮预测阈值')->default('10');
+            $form->number('next_round_prepare_seconds', '下一轮提前秒数')->min(1)->default(20);
+            $form->display('next_round_last_prepared_round_key', '最后预下单轮次');
             $form->text('tail_trigger_amount', '触发阈值');
             $form->number('tail_time_limit_seconds', '限制时间(秒)')->min(1)->default(30);
             $form->number('tail_loss_stop_count', '亏损停单数')->min(0)->default(0);

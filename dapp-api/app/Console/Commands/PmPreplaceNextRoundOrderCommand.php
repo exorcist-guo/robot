@@ -36,6 +36,12 @@ class PmPreplaceNextRoundOrderCommand extends Command
             foreach ($tasks as $task) {
                 $prepared = $nextRoundService->prepare($task, $gammaClient, $now);
                 if (($prepared['ok'] ?? false) !== true) {
+                    $reason = (string) ($prepared['reason'] ?? 'unknown');
+                    $context = collect($prepared)
+                        ->except(['ok'])
+                        ->map(fn ($value) => is_scalar($value) || $value === null ? $value : json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES))
+                        ->all();
+                    $this->line('任务 '.$task->id.' 跳过: '.$reason.' '.json_encode($context, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
                     continue;
                 }
 
