@@ -5,6 +5,7 @@ namespace App\Console;
 use App\Console\Commands\BnbHealthCheckCommand;
 use App\Console\Commands\PmApproveWalletCommand;
 use App\Console\Commands\PmBacktestTailSweepCommand;
+use App\Console\Commands\PmBacktestTailSweepGapCommand;
 use App\Console\Commands\PmDebugOrderIntentCommand;
 use App\Console\Commands\PmOptimizeTailSweepCommand;
 use App\Console\Commands\PmPollLeaderTradesCommand;
@@ -26,6 +27,7 @@ class Kernel extends ConsoleKernel
         BnbHealthCheckCommand::class,
         PmApproveWalletCommand::class,
         PmBacktestTailSweepCommand::class,
+        PmBacktestTailSweepGapCommand::class,
         PmDebugOrderIntentCommand::class,
         PmOptimizeTailSweepCommand::class,
         PmLossOrderAvgPriceCommand::class,
