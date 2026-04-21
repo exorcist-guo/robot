@@ -14,9 +14,10 @@ class PmOptimizeTailSweepCommand extends Command
         {--diffs= : 自动生成配置的价差候选，组间用 | 分隔，组内用 , 分隔}
         {--times= : 自动生成配置的时间候选，组间用 | 分隔，组内用 , 分隔}
         {--top=20 : 输出前 N 名}
-        {--min-executed=1 : 过滤最小成交轮次}';
+        {--min-executed=1 : 过滤最小成交轮次}
+        {--sort=profit : 排序模式：profit=净盈利最大，loss=亏损最大}';
 
-    protected $description = '批量回测模式二配置并找出收益更优的参数组合';
+    protected $description = '批量回测模式二配置并找出盈利最大或亏损最大的参数组合';
 
     public function handle(PmBacktestTailSweepCommand $backtestCommand): int
     {
@@ -39,6 +40,12 @@ class PmOptimizeTailSweepCommand extends Command
 
         $top = max(1, (int) $this->option('top'));
         $minExecuted = max(1, (int) $this->option('min-executed'));
+        $sort = strtolower(trim((string) $this->option('sort')) ?: 'profit');
+        if (!in_array($sort, ['profit', 'loss'], true)) {
+            $this->error('sort 仅支持 profit|loss');
+
+            return self::FAILURE;
+        }
         $rawConfigSet = trim((string) $this->option('config-set'));
         $rawDiffs = trim((string) $this->option('diffs'));
         $rawTimes = trim((string) $this->option('times'));
@@ -68,6 +75,8 @@ class PmOptimizeTailSweepCommand extends Command
         $results = [];
         $totalCandidates = count($candidates);
         $bestResult = null;
+        $bestLabel = $sort === 'loss' ? '最大亏损' : '最优';
+        $bestStandard = $sort === 'loss' ? '净盈利最小（亏损最大）' : '净盈利最大';
         foreach ($candidates as $index => $candidate) {
             $prefix = '['.($index + 1).'/'.$totalCandidates.'] ';
 
@@ -94,14 +103,18 @@ class PmOptimizeTailSweepCommand extends Command
 
             $results[] = $current;
 
-            if ($bestResult === null || $this->compareNumericString($current['net_profit'], $bestResult['net_profit']) === 1) {
+            if ($bestResult === null || ($sort === 'loss'
+                    ? $this->compareNumericString($current['net_profit'], $bestResult['net_profit']) === -1
+                    : $this->compareNumericString($current['net_profit'], $bestResult['net_profit']) === 1)) {
                 $bestResult = $current;
-                $this->line($prefix.'发现新的最优配置 '.$current['config'].' => 净盈利='.$current['net_profit'].' 收益率='.$current['roi'].' 成交轮次='.$current['executed_rounds'].' 胜率='.$current['win_rate'].' 跳过轮次='.$current['skipped_rounds'].' 触发轮次='.$current['triggered_rounds']);
+                $this->line($prefix.'发现新的'.$bestLabel.'配置 '.$current['config'].' => 净盈利='.$current['net_profit'].' 收益率='.$current['roi'].' 成交轮次='.$current['executed_rounds'].' 胜率='.$current['win_rate'].' 跳过轮次='.$current['skipped_rounds'].' 触发轮次='.$current['triggered_rounds']);
             }
         }
 
-        usort($results, function (array $left, array $right): int {
-            return $this->compareNumericString((string) $right['net_profit'], (string) $left['net_profit']);
+        usort($results, function (array $left, array $right) use ($sort): int {
+            return $sort === 'loss'
+                ? $this->compareNumericString((string) $left['net_profit'], (string) $right['net_profit'])
+                : $this->compareNumericString((string) $right['net_profit'], (string) $left['net_profit']);
         });
 
         $ranked = array_slice($results, 0, $top);
@@ -110,7 +123,8 @@ class PmOptimizeTailSweepCommand extends Command
             ['周期', $period],
             ['标的', $symbol],
             ['买入金额', $amount],
-            ['最优标准', '净盈利最大'],
+            ['排序模式', $sort],
+            ['最优标准', $bestStandard],
             ['最小成交轮次', (string) $minExecuted],
             ['候选配置数', (string) count($candidates)],
             ['入榜配置数', (string) count($ranked)],
