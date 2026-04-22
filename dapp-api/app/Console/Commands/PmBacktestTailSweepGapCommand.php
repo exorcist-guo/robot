@@ -16,6 +16,7 @@ class PmBacktestTailSweepGapCommand extends Command
         {--amount=20 : 模式二买入金额，默认 20 USDC}
         {--min-predict-diff=10 : 模式一最小预测价差，支持单值或区间如 10-20}
         {--date= : 指定日期(YYYY-MM-DD)，仅对 mode=1 生效，窗口为当天 00:00:00-23:59:59}
+        {--random-predict : 模式一触发信号后随机预测涨跌，而不是沿用当前方向}
         {--detail : 输出明细}';
 
     protected $description = '使用隔一轮预测规则回测 tail sweep 策略';
@@ -122,6 +123,8 @@ class PmBacktestTailSweepGapCommand extends Command
             ->get(['id', 'round_start_at', 'round_end_at', 'round_open_price'])
             ->values();
 
+        $randomPredict = (bool) $this->option('random-predict');
+
         $details = [];
         $winCount = 0;
         $loseCount = 0;
@@ -211,7 +214,13 @@ class PmBacktestTailSweepGapCommand extends Command
             }
 
             // 2) 产生信号：本轮价差达标则在下一轮（i+1）下注，且 A/B 交替
-            $nextPrediction = bccomp($priceDiffAbs, $minPredictDiff, 8) === -1 ? null : $actualDirection;
+            $signalTriggered = bccomp($priceDiffAbs, $minPredictDiff, 8) !== -1;
+            $nextPrediction = null;
+            if ($signalTriggered) {
+                $nextPrediction = $randomPredict
+                    ? (random_int(0, 1) === 1 ? 'up' : 'down')
+                    : $actualDirection;
+            }
             $targetIndex = $i + 1;
             $scheduledLine = null;
             $scheduledBetAmount = '0';
@@ -259,6 +268,7 @@ class PmBacktestTailSweepGapCommand extends Command
                     'funding_need' => $currentFundingNeed,
                     'reset_lose_count' => (string) $resetLoseCount,
                     'signal' => $nextPrediction ?? 'skip',
+                    'predict_mode' => $randomPredict ? 'random' : 'trend',
                     'scheduled_line' => $scheduledLine ?? 'skip',
                     'scheduled_bet' => $scheduledLine !== null ? $scheduledBetAmount : '0',
                     'scheduled_target_id' => $targetIndex < $rows->count() ? (string) $rows[$targetIndex]->id : 'skip',
