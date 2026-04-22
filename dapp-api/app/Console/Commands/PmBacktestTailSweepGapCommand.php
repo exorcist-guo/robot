@@ -125,17 +125,24 @@ class PmBacktestTailSweepGapCommand extends Command
         $winCount = 0;
         $loseCount = 0;
         $sampleCount = 0;
-        $predictions = [];
+
+        // 采用 A/B 两条线交替下注：每次触发条件时只在 A 或 B 其中一条线上下注，下一次触发切换到另一条线。
+        // 这样每条线在决定下一次下注金额时，都能确保上一笔同线下注的结果已经在上一轮开盘价出来时判定过。
         $baseBet = '5';
         $maxLoseResetLimit = 6;
         $resetLoseCount = 0;
-        $currentBet = $baseBet;
+
+        $nextLine = 'A';
+        $scheduled = []; // key=roundIndex, value=['line'=>'A|B','prediction'=>'up|down','bet'=>'5','placed_round_id'=>int]
+
+        $lineBet = ['A' => $baseBet, 'B' => $baseBet];
+        $lineLoseStreak = ['A' => 0, 'B' => 0];
+        $lineFundingNeed = ['A' => '0', 'B' => '0'];
+
         $maxBet = $baseBet;
         $netProfit = '0';
         $totalStake = '0';
-        $currentLoseStreak = 0;
         $maxLoseStreak = 0;
-        $currentFundingNeed = '0';
         $maxFundingNeed = '0';
         $loseStreakStats = [];
 
@@ -149,58 +156,86 @@ class PmBacktestTailSweepGapCommand extends Command
 
             $actualDirection = bccomp($currentOpen, $prevOpen, 8) === 1 ? 'up' : 'down';
             $priceDiffAbs = $this->bcAbs($this->bcSub($currentOpen, $prevOpen, 8));
-            $prediction = $predictions[$i] ?? null;
+
+            // 1) 结算本轮（i）的下注（如果之前有安排在 i 轮结算的下注）
             $result = null;
             $betAmount = '0';
+            $betLine = null;
+            $prediction = null;
+            $placedRoundId = null;
 
-            if ($prediction !== null) {
+            if (isset($scheduled[$i])) {
+                $betLine = (string) ($scheduled[$i]['line'] ?? '');
+                $prediction = (string) ($scheduled[$i]['prediction'] ?? '');
+                $betAmount = (string) ($scheduled[$i]['bet'] ?? '0');
+                $placedRoundId = $scheduled[$i]['placed_round_id'] ?? null;
+                unset($scheduled[$i]);
+
                 $sampleCount++;
                 $result = $prediction === $actualDirection ? 'win' : 'lose';
-                $betAmount = $currentBet;
-                $totalStake = $this->bcAdd($totalStake, $betAmount, 8);
-                $currentFundingNeed = $this->bcAdd($currentFundingNeed, $betAmount, 8);
-                if (bccomp($currentFundingNeed, $maxFundingNeed, 8) === 1) {
-                    $maxFundingNeed = $currentFundingNeed;
-                }
 
                 if ($result === 'win') {
-                    if ($currentLoseStreak > 2) {
-                        $loseStreakStats[$currentLoseStreak] = ($loseStreakStats[$currentLoseStreak] ?? 0) + 1;
+                    if (($lineLoseStreak[$betLine] ?? 0) > 2) {
+                        $loseStreakStats[$lineLoseStreak[$betLine]] = ($loseStreakStats[$lineLoseStreak[$betLine]] ?? 0) + 1;
                     }
                     $winCount++;
                     $netProfit = $this->bcAdd($netProfit, $betAmount, 8);
-                    $currentBet = $baseBet;
-                    $currentLoseStreak = 0;
-                    $currentFundingNeed = '0';
+                    $lineBet[$betLine] = $baseBet;
+                    $lineLoseStreak[$betLine] = 0;
+                    $lineFundingNeed[$betLine] = '0';
                 } else {
                     $loseCount++;
                     $netProfit = $this->bcSub($netProfit, $betAmount, 8);
-                    $currentLoseStreak++;
-                    if ($currentLoseStreak > $maxLoseStreak) {
-                        $maxLoseStreak = $currentLoseStreak;
+
+                    $lineLoseStreak[$betLine] = ($lineLoseStreak[$betLine] ?? 0) + 1;
+                    if ($lineLoseStreak[$betLine] > $maxLoseStreak) {
+                        $maxLoseStreak = $lineLoseStreak[$betLine];
                     }
 
-                    if ($currentLoseStreak > $maxLoseResetLimit) {
+                    if ($lineLoseStreak[$betLine] > $maxLoseResetLimit) {
                         $resetLoseCount++;
-                        if ($currentLoseStreak > 2) {
-                            $loseStreakStats[$currentLoseStreak] = ($loseStreakStats[$currentLoseStreak] ?? 0) + 1;
+                        if ($lineLoseStreak[$betLine] > 2) {
+                            $loseStreakStats[$lineLoseStreak[$betLine]] = ($loseStreakStats[$lineLoseStreak[$betLine]] ?? 0) + 1;
                         }
-                        $currentLoseStreak = 0;
-                        $currentFundingNeed = '0';
-                        $currentBet = $baseBet;
+                        $lineLoseStreak[$betLine] = 0;
+                        $lineFundingNeed[$betLine] = '0';
+                        $lineBet[$betLine] = $baseBet;
                     } else {
-                        $currentBet = bcmul($betAmount, '2', 8);
-                        if (bccomp($currentBet, $maxBet, 8) === 1) {
-                            $maxBet = $currentBet;
+                        $lineBet[$betLine] = bcmul($betAmount, '2', 8);
+                        if (bccomp($lineBet[$betLine], $maxBet, 8) === 1) {
+                            $maxBet = $lineBet[$betLine];
                         }
                     }
                 }
             }
 
+            // 2) 产生信号：本轮价差达标则在下一轮（i+1）下注，且 A/B 交替
             $nextPrediction = bccomp($priceDiffAbs, $minPredictDiff, 8) === -1 ? null : $actualDirection;
-            $targetIndex = $i + 2;
-            if ($targetIndex < $rows->count()) {
-                $predictions[$targetIndex] = $nextPrediction;
+            $targetIndex = $i + 1;
+            $scheduledLine = null;
+            $scheduledBetAmount = '0';
+            $currentFundingNeed = $this->bcAdd($lineFundingNeed['A'], $lineFundingNeed['B'], 8);
+
+            if ($nextPrediction !== null && $targetIndex < $rows->count() && !isset($scheduled[$targetIndex])) {
+                $scheduledLine = $nextLine;
+                $nextLine = $nextLine === 'A' ? 'B' : 'A';
+
+                $scheduledBetAmount = (string) ($lineBet[$scheduledLine] ?? $baseBet);
+
+                // 统计：下注发生时计入 stake 与资金占用
+                $totalStake = $this->bcAdd($totalStake, $scheduledBetAmount, 8);
+                $lineFundingNeed[$scheduledLine] = $this->bcAdd($lineFundingNeed[$scheduledLine], $scheduledBetAmount, 8);
+                $currentFundingNeed = $this->bcAdd($lineFundingNeed['A'], $lineFundingNeed['B'], 8);
+                if (bccomp($currentFundingNeed, $maxFundingNeed, 8) === 1) {
+                    $maxFundingNeed = $currentFundingNeed;
+                }
+
+                $scheduled[$targetIndex] = [
+                    'line' => $scheduledLine,
+                    'prediction' => $nextPrediction,
+                    'bet' => $scheduledBetAmount,
+                    'placed_round_id' => $rows[$i]->id,
+                ];
             }
 
             if ((bool) $this->option('detail')) {
@@ -209,26 +244,32 @@ class PmBacktestTailSweepGapCommand extends Command
                     'round_start_at' => optional($rows[$i]->round_start_at)->toDateTimeString(),
                     'prev_open' => $prevOpen,
                     'current_open' => $currentOpen,
+                    'line' => $betLine ?? 'skip',
                     'prediction' => $prediction ?? 'skip',
                     'actual' => $actualDirection,
                     '价差绝对值' => $priceDiffAbs,
-                    'bet_amount' => $prediction !== null ? $betAmount : '0',
+                    'bet_amount' => $betLine !== null ? $betAmount : '0',
                     'result' => $result ?? 'skip',
                     'total_stake' => $totalStake,
                     'net_profit' => $netProfit,
                     'profit_ratio' => bccomp($totalStake, '0', 8) === 1 ? $this->formatBcPercent($netProfit, $totalStake, 4) : '0.00%',
-                    'lose_streak' => $prediction !== null ? (string) $currentLoseStreak : '0',
-                    'funding_need' => $prediction !== null ? $currentFundingNeed : '0',
+                    'lose_streak_A' => (string) $lineLoseStreak['A'],
+                    'lose_streak_B' => (string) $lineLoseStreak['B'],
+                    'funding_need' => $currentFundingNeed,
                     'reset_lose_count' => (string) $resetLoseCount,
-                    'next_prediction' => $nextPrediction ?? 'skip',
-                    'next_bet_amount' => $nextPrediction !== null ? $currentBet : '0',
-                    '预测目标ID' => $targetIndex < $rows->count() ? (string) $rows[$targetIndex]->id : 'skip',
+                    'signal' => $nextPrediction ?? 'skip',
+                    'scheduled_line' => $scheduledLine ?? 'skip',
+                    'scheduled_bet' => $scheduledLine !== null ? $scheduledBetAmount : '0',
+                    'scheduled_target_id' => $targetIndex < $rows->count() ? (string) $rows[$targetIndex]->id : 'skip',
+                    'placed_from_round_id' => $placedRoundId !== null ? (string) $placedRoundId : 'skip',
                 ];
             }
         }
 
-        if ($currentLoseStreak > 2) {
-            $loseStreakStats[$currentLoseStreak] = ($loseStreakStats[$currentLoseStreak] ?? 0) + 1;
+        foreach (['A', 'B'] as $line) {
+            if (($lineLoseStreak[$line] ?? 0) > 2) {
+                $loseStreakStats[$lineLoseStreak[$line]] = ($loseStreakStats[$lineLoseStreak[$line]] ?? 0) + 1;
+            }
         }
 
         ksort($loseStreakStats);

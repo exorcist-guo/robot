@@ -52,10 +52,8 @@ class IntentExecutionPrecheckService
             ]);
         }
 
+        // leader_price 仅用于记录 leader 成交参考价；跟单实际下单按当时 orderbook 市价执行。
         $leaderPrice = (string) ($intent->leader_price ?: '0');
-        if (bccomp($leaderPrice, '0', 8) <= 0) {
-            return $this->failure('invalid_price', ['leader_price' => $leaderPrice]);
-        }
 
         $side = strtoupper((string) $intent->side);
         if (!in_array($side, [PolymarketTradingService::SIDE_BUY, PolymarketTradingService::SIDE_SELL], true)) {

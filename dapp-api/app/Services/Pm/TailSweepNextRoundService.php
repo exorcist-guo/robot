@@ -2,7 +2,6 @@
 
 namespace App\Services\Pm;
 
-use App\Models\Pm\PmCopyTask;
 use App\Models\Pm\PmTailSweepRoundOpenPrice;
 use Illuminate\Support\Carbon;
 
@@ -13,11 +12,13 @@ class TailSweepNextRoundService
     }
 
     /**
+     * @param array<string,mixed> $config
      * @return array<string,mixed>
      */
-    public function prepare(PmCopyTask $task, GammaClient $gammaClient, Carbon $now): array
+    public function prepare(array $config, GammaClient $gammaClient, Carbon $now): array
     {
-        $baseSlug = $this->marketData->normalizeBaseSlug((string) $task->market_slug);
+        $marketSlug = (string) ($config['market_slug'] ?? '');
+        $baseSlug = $this->marketData->normalizeBaseSlug($marketSlug);
         if ($baseSlug === '') {
             return ['ok' => false, 'reason' => 'missing_market_slug'];
         }
@@ -26,27 +27,23 @@ class TailSweepNextRoundService
             return [
                 'ok' => false,
                 'reason' => 'unsupported_round_slug',
-                'market_slug' => (string) $task->market_slug,
+                'market_slug' => $marketSlug,
                 'base_slug' => $baseSlug,
             ];
         }
 
-        $currentRoundStart = str_contains($baseSlug, '15m')
+        $isFifteenMinutes = str_contains($baseSlug, '15m');
+        $roundSpan = $isFifteenMinutes ? 900 : 300;
+        $currentRoundStart = $isFifteenMinutes
             ? $this->marketData->getRoundStartTime15($now)
             : $this->marketData->getRoundStartTime($now);
-        $currentRoundEnd = str_contains($baseSlug, '15m')
-            ? $currentRoundStart + 900
-            : $currentRoundStart + 300;
-        $prevRoundStart = str_contains($baseSlug, '15m')
-            ? $currentRoundStart - 900
-            : $currentRoundStart - 300;
+        $currentRoundEnd = $currentRoundStart + $roundSpan;
+        $prevRoundStart = $currentRoundStart - $roundSpan;
         $nextRoundStart = $currentRoundEnd;
-        $nextRoundEnd = str_contains($baseSlug, '15m')
-            ? $nextRoundStart + 900
-            : $nextRoundStart + 300;
+        $nextRoundEnd = $nextRoundStart + $roundSpan;
 
         $remainingSeconds = max(0, $now->diffInSeconds(Carbon::createFromTimestamp($currentRoundEnd), false));
-        $prepareSeconds = max(1, (int) ($task->next_round_prepare_seconds ?: 20));
+        $prepareSeconds = max(1, (int) (($config['next_round_prepare_seconds'] ?? 20) ?: 20));
         if ($remainingSeconds > $prepareSeconds) {
             return [
                 'ok' => false,
@@ -56,8 +53,9 @@ class TailSweepNextRoundService
             ];
         }
 
-        $prevOpen = $this->getRoundOpenPrice((string) ($task->market_symbol ?: 'btc/usd'), $prevRoundStart, $prevRoundStart + (str_contains($baseSlug, '15m') ? 900 : 300));
-        $currentOpen = $this->getRoundOpenPrice((string) ($task->market_symbol ?: 'btc/usd'), $currentRoundStart, $currentRoundEnd);
+        $symbol = (string) (($config['market_symbol'] ?? 'btc/usd') ?: 'btc/usd');
+        $prevOpen = $this->getRoundOpenPrice($symbol, $prevRoundStart, $prevRoundStart + $roundSpan);
+        $currentOpen = $this->getRoundOpenPrice($symbol, $currentRoundStart, $currentRoundEnd);
         if ($prevOpen === null || $currentOpen === null) {
             return [
                 'ok' => false,
@@ -67,7 +65,7 @@ class TailSweepNextRoundService
             ];
         }
 
-        $predict = $this->predictNextSide($task, $prevOpen, $currentOpen);
+        $predict = $this->predictNextSide($config, $prevOpen, $currentOpen);
         if (($predict['ok'] ?? false) !== true) {
             return $predict + [
                 'prev_round_open_price' => $prevOpen,
@@ -123,9 +121,10 @@ class TailSweepNextRoundService
     }
 
     /**
+     * @param array<string,mixed> $config
      * @return array<string,mixed>
      */
-    public function predictNextSide(PmCopyTask $task, string $prevOpen, string $currentOpen): array
+    public function predictNextSide(array $config, string $prevOpen, string $currentOpen): array
     {
         if (!$this->isPositiveDecimal($prevOpen) || !$this->isPositiveDecimal($currentOpen)) {
             return ['ok' => false, 'reason' => 'invalid_round_open_price'];
@@ -133,7 +132,7 @@ class TailSweepNextRoundService
 
         $predictDiff = bcsub($currentOpen, $prevOpen, 8);
         $predictAbsDiff = $predictDiff[0] === '-' ? bcmul($predictDiff, '-1', 8) : $predictDiff;
-        $minPredictDiff = trim((string) ($task->next_round_min_predict_diff ?: '10'));
+        $minPredictDiff = trim((string) (($config['next_round_min_predict_diff'] ?? '10') ?: '10'));
         if ($minPredictDiff === '' || !preg_match('/^\d+(\.\d+)?$/', $minPredictDiff)) {
             $minPredictDiff = '10';
         }
