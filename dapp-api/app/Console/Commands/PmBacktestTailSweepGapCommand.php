@@ -133,7 +133,7 @@ class PmBacktestTailSweepGapCommand extends Command
         // 采用 A/B 两条线交替下注：每次触发条件时只在 A 或 B 其中一条线上下注，下一次触发切换到另一条线。
         // 这样每条线在决定下一次下注金额时，都能确保上一笔同线下注的结果已经在上一轮开盘价出来时判定过。
         $baseBet = '5';
-        $maxLoseResetLimit = 6;
+        $maxLoseResetLimit = 5;
         $resetLoseCount = 0;
 
         $nextLine = 'A';
