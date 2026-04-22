@@ -15,6 +15,7 @@ class PmBacktestTailSweepGapCommand extends Command
         {--symbol=btc/usd : 默认标的}
         {--amount=20 : 模式二买入金额，默认 20 USDC}
         {--min-predict-diff=10 : 模式一最小预测价差，支持单值或区间如 10-20}
+        {--date= : 指定日期(YYYY-MM-DD)，仅对 mode=1 生效，窗口为当天 00:00:00-23:59:59}
         {--detail : 输出明细}';
 
     protected $description = '使用隔一轮预测规则回测 tail sweep 策略';
@@ -610,6 +611,22 @@ class PmBacktestTailSweepGapCommand extends Command
     private function resolveWindow(): array
     {
         $period = (string) $this->argument('period');
+        $mode = (string) $this->option('mode');
+
+        // mode=1 支持按指定日期回测：窗口为指定日期 00:00:00 - 23:59:59
+        $dateOption = trim((string) $this->option('date'));
+        if ($mode === '1' && $dateOption !== '') {
+            if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $dateOption) !== 1) {
+                throw new \InvalidArgumentException('date 格式必须为 YYYY-MM-DD');
+            }
+
+            $startAt = Carbon::parse($dateOption, config('app.timezone'))
+                ->startOfDay();
+            $endAt = $startAt->copy()->endOfDay();
+
+            return [$startAt, $endAt];
+        }
+
         $endAt = now();
 
         if ($period === 'day') {
