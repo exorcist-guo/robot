@@ -269,6 +269,8 @@ class PolymarketTradingService
                 'book' => is_array($book) ? $book : [],
                 'price' => null,
                 'depth_reached' => false,
+                'consumable_size' => '0',
+                'consumable_notional' => '0',
                 'min_size' => isset($book['min_order_size']) ? (string) $book['min_order_size'] : null,
             ];
         }
@@ -284,6 +286,8 @@ class PolymarketTradingService
 
         $remaining = BigDecimal::of($amount);
         $marketPrice = null;
+        $consumedSize = BigDecimal::zero();
+        $consumedNotional = BigDecimal::zero();
 
         foreach ($levels as $level) {
             $price = isset($level['price']) ? trim((string) $level['price']) : '';
@@ -300,14 +304,25 @@ class PolymarketTradingService
 
             $marketPrice = $price;
             if ($remaining->isLessThanOrEqualTo($consumable)) {
+                $fillSize = strtoupper($side) === self::SIDE_BUY
+                    ? $remaining->dividedBy($priceDec, 8, RoundingMode::DOWN)
+                    : $remaining;
+
+                $consumedSize = $consumedSize->plus($fillSize);
+                $consumedNotional = $consumedNotional->plus($priceDec->multipliedBy($fillSize));
+
                 return [
                     'book' => is_array($book) ? $book : [],
                     'price' => $marketPrice,
                     'depth_reached' => true,
+                    'consumable_size' => $consumedSize->toScale(8, RoundingMode::DOWN)->stripTrailingZeros()->__toString(),
+                    'consumable_notional' => $consumedNotional->toScale(6, RoundingMode::DOWN)->stripTrailingZeros()->__toString(),
                     'min_size' => isset($book['min_order_size']) ? (string) $book['min_order_size'] : null,
                 ];
             }
 
+            $consumedSize = $consumedSize->plus($sizeDec);
+            $consumedNotional = $consumedNotional->plus($priceDec->multipliedBy($sizeDec));
             $remaining = $remaining->minus($consumable);
         }
 
@@ -315,6 +330,8 @@ class PolymarketTradingService
             'book' => is_array($book) ? $book : [],
             'price' => $marketPrice,
             'depth_reached' => false,
+            'consumable_size' => $consumedSize->toScale(8, RoundingMode::DOWN)->stripTrailingZeros()->__toString(),
+            'consumable_notional' => $consumedNotional->toScale(6, RoundingMode::DOWN)->stripTrailingZeros()->__toString(),
             'min_size' => isset($book['min_order_size']) ? (string) $book['min_order_size'] : null,
         ];
     }

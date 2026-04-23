@@ -77,10 +77,22 @@ class IntentExecutionPrecheckService
 
         $executionPrice = (string) ($marketPriceQuote['price'] ?? '0');
         if (bccomp($executionPrice, '0', 8) <= 0) {
-            return $this->failure('missing_best_price', [
+            $liquidityReason = $side === PolymarketTradingService::SIDE_SELL
+                ? 'no_bid_liquidity'
+                : 'no_ask_liquidity';
+
+            return $this->failure($liquidityReason, [
                 'quote' => $marketPriceQuote,
                 'leader_price' => $leaderPrice,
             ]);
+        }
+
+        $sellConsumableSize = null;
+        if ($side === PolymarketTradingService::SIDE_SELL) {
+            $consumableSize = (string) ($marketPriceQuote['consumable_size'] ?? '0');
+            if (preg_match('/^\d+(\.\d+)?$/', $consumableSize) === 1 && bccomp($consumableSize, '0', 8) === 1) {
+                $sellConsumableSize = BigDecimal::of($consumableSize);
+            }
         }
 
         $sizeScale = $side === PolymarketTradingService::SIDE_BUY ? 2 : 4;
@@ -91,6 +103,10 @@ class IntentExecutionPrecheckService
         if ($side === PolymarketTradingService::SIDE_BUY && $minOrderSize !== null && $size->isLessThan($minOrderSize)) {
             $size = $minOrderSize;
             $usdc = $minOrderSize->multipliedBy($executionPrice)->toScale(6, RoundingMode::UP);
+        }
+        if ($side === PolymarketTradingService::SIDE_SELL && $sellConsumableSize !== null && $size->isGreaterThan($sellConsumableSize)) {
+            $size = $sellConsumableSize;
+            $usdc = $sellConsumableSize->multipliedBy($executionPrice)->toScale(6, RoundingMode::DOWN);
         }
 
         if ($size->isLessThanOrEqualTo(BigDecimal::zero())) {
@@ -126,6 +142,32 @@ class IntentExecutionPrecheckService
                     'side' => $side,
                     'cached_at' => now()->toDateTimeString(),
                 ]), 300);
+            }
+        }
+
+        if (($readiness['is_ready'] ?? false) !== true && $side === PolymarketTradingService::SIDE_SELL && ($readiness['failure_code'] ?? null) === 'insufficient_position_balance') {
+            $balanceUnits = (string) ($readiness['balance'] ?? '0');
+            if (preg_match('/^\d+$/', $balanceUnits) === 1 && bccomp($balanceUnits, '0', 0) === 1) {
+                $balanceSize = BigDecimal::of($balanceUnits)
+                    ->dividedBy('1000000', 8, RoundingMode::DOWN)
+                    ->stripTrailingZeros();
+
+                if ($balanceSize->isGreaterThan(BigDecimal::zero())) {
+                    $size = $balanceSize;
+                    $normalizedSize = $size->stripTrailingZeros()->__toString();
+                    $normalizedNotional = BigDecimal::of($normalizedPrice)
+                        ->multipliedBy($normalizedSize)
+                        ->toScale(6, RoundingMode::DOWN);
+                    $usdc = $normalizedNotional;
+
+                    $readiness = $this->trading->getTradingReadiness(
+                        $wallet,
+                        $side,
+                        (string) $intent->token_id,
+                        $normalizedPrice,
+                        $normalizedSize,
+                    );
+                }
             }
         }
 
