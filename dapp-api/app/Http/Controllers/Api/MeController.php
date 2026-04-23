@@ -120,6 +120,31 @@ class MeController extends Controller
         ];
     }
 
+    private function formatDateTime(mixed $value): ?string
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        if ($value instanceof Carbon) {
+            return $value->toDateTimeString();
+        }
+
+        if (is_numeric($value)) {
+            return Carbon::createFromTimestamp((int) $value)->toDateTimeString();
+        }
+
+        if (is_string($value)) {
+            try {
+                return Carbon::parse($value)->toDateTimeString();
+            } catch (\Throwable) {
+                return $value;
+            }
+        }
+
+        return null;
+    }
+
     private function transformOrder(PmOrder $order, bool $includePayloads = false): array
     {
         $intent = $order->intent;
@@ -163,7 +188,7 @@ class MeController extends Controller
             'settlement_view_status' => $settlementView['status'],
             'settlement_view_text' => $settlementView['text'],
             'claim_tx_hash' => $order->claim_tx_hash,
-            'submitted_at' => $order->submitted_at?->toDateTimeString(),
+            'submitted_at' => $this->formatDateTime($order->submitted_at),
             'leader' => $leader ? [
                 'id' => $leader->id,
                 'display_name' => $leader->display_name,
@@ -173,7 +198,7 @@ class MeController extends Controller
                 'side' => $trade->side,
                 'price' => $trade->price,
                 'size_usdc' => (string) $trade->size_usdc,
-                'traded_at' => $trade->traded_at?->toDateTimeString(),
+                'traded_at' => $this->formatDateTime($trade->traded_at),
             ] : null,
             'intent' => $intent ? [
                 'id' => $intent->id,
