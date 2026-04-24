@@ -106,6 +106,30 @@ class PurchaseTrackingService
         ];
     }
 
+    public function getOpenQuantityByToken(int $memberId, int $copyTaskId, string $tokenId): string
+    {
+        $tokenId = trim($tokenId);
+        if ($memberId <= 0 || $copyTaskId <= 0 || $tokenId === '') {
+            return '0';
+        }
+
+        $total = PmPurchaseTracking::query()
+            ->where('member_id', $memberId)
+            ->where('copy_task_id', $copyTaskId)
+            ->where('token_id', $tokenId)
+            ->get()
+            ->reduce(function (BigDecimal $carry, PmPurchaseTracking $lot) {
+                $remaining = (string) $lot->remaining_size;
+                if (preg_match('/^\d+(\.\d+)?$/', $remaining) !== 1 || bccomp($remaining, '0', 8) <= 0) {
+                    return $carry;
+                }
+
+                return $carry->plus(BigDecimal::of($remaining));
+            }, BigDecimal::zero());
+
+        return $total->toScale(8, RoundingMode::DOWN)->stripTrailingZeros()->__toString();
+    }
+
     private function resolveFilledSize(PmOrder $order): ?string
     {
         foreach ([

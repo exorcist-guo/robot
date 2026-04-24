@@ -117,6 +117,8 @@ class PmExecuteOrderIntentJob implements ShouldQueue
             PmOrder::updateOrCreate(
                 ['order_intent_id' => $intent->id],
                 [
+                    'leader_role' => $intent->leader_role,
+                    'token_id' => $intent->token_id,
                     'status' => PmOrder::STATUS_REJECTED,
                     'request_payload' => array_merge($requestContext, ['request' => $requestPayload]),
                     'response_payload' => ['dry_run' => true],
@@ -154,6 +156,8 @@ class PmExecuteOrderIntentJob implements ShouldQueue
             $savedOrder = PmOrder::updateOrCreate(
                 ['order_intent_id' => $intent->id],
                 [
+                    'leader_role' => $intent->leader_role,
+                    'token_id' => $intent->token_id,
                     'poly_order_id' => $result['response']['id'] ?? $result['response']['orderID'] ?? null,
                     'status' => $remoteStatus,
                     'request_payload' => array_merge($requestContext, ['request' => $result['request']]),
@@ -210,6 +214,8 @@ class PmExecuteOrderIntentJob implements ShouldQueue
             PmOrder::updateOrCreate(
                 ['order_intent_id' => $intent->id],
                 [
+                    'leader_role' => $intent->leader_role,
+                    'token_id' => $intent->token_id,
                     'status' => PmOrder::STATUS_ERROR,
                     'request_payload' => array_merge($requestContext, ['request' => $requestPayload]),
                     'response_payload' => null,
@@ -263,6 +269,8 @@ class PmExecuteOrderIntentJob implements ShouldQueue
         PmOrder::updateOrCreate(
             ['order_intent_id' => $intent->id],
             [
+                'leader_role' => $intent->leader_role,
+                'token_id' => $intent->token_id,
                 'status' => $orderStatus,
                 'request_payload' => $context,
                 'response_payload' => null,
@@ -302,6 +310,8 @@ class PmExecuteOrderIntentJob implements ShouldQueue
         PmOrder::updateOrCreate(
             ['order_intent_id' => $intent->id],
             [
+                'leader_role' => $intent->leader_role,
+                'token_id' => $intent->token_id,
                 'status' => $orderStatus,
                 'request_payload' => $context,
                 'response_payload' => null,

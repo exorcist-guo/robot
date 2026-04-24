@@ -24,13 +24,14 @@ class PolymarketDataClient
      *
      * @return array<int, array<string,mixed>>
      */
-    public function getTradesByUser(string $user, int $limit = 50, int $offset = 0): array
+    public function getTradesByUser(string $user, int $limit = 50, int $offset = 0, bool $takerOnly = false): array
     {
         $res = $this->client->get('trades', [
             'query' => [
                 'user' => $user,
                 'limit' => $limit,
                 'offset' => $offset,
+                'takerOnly' => $takerOnly ? 'true' : 'false',
             ],
             'headers' => [
                 'User-Agent' => 'Mozilla/5.0',
@@ -170,7 +171,7 @@ class PolymarketDataClient
      */
     public function getTradesByUserInLastDays(string $user, int $days = 30, int $limit = 100, int $offset = 0): array
     {
-        $items = $this->getTradesByUser($user, $limit, $offset);
+        $items = $this->getTradesByUser($user, $limit, $offset, false);
         $cutoff = Carbon::now()->subDays($days)->timestamp;
 
         return array_values(array_filter($items, function (array $trade) use ($cutoff) {
@@ -251,6 +252,20 @@ class PolymarketDataClient
         $price = (string) ($trade['price'] ?? '0');
         $size = (string) ($trade['size'] ?? $trade['amount'] ?? $trade['shares'] ?? '0');
         $sizeUsdc = $this->toUsdcAtomic($price, $size);
+        $proxyWallet = strtolower((string) ($trade['proxyWallet'] ?? $trade['proxy_wallet'] ?? $trade['user'] ?? $trade['owner'] ?? ''));
+        $maker = strtolower((string) ($trade['maker'] ?? $trade['makerAddress'] ?? $trade['maker_address'] ?? ''));
+        $taker = strtolower((string) ($trade['taker'] ?? $trade['takerAddress'] ?? $trade['taker_address'] ?? ''));
+        $leaderRole = (string) ($trade['leader_role'] ?? 'unknown');
+        if ($leaderRole !== 'maker' && $leaderRole !== 'taker') {
+            $leaderRole = 'unknown';
+            if ($proxyWallet !== '') {
+                if ($maker !== '' && $maker === $proxyWallet) {
+                    $leaderRole = 'maker';
+                } elseif ($taker !== '' && $taker === $proxyWallet) {
+                    $leaderRole = 'taker';
+                }
+            }
+        }
 
         $time = $trade['time'] ?? $trade['timestamp'] ?? $trade['created_at'] ?? $trade['createdAt'] ?? now()->toIso8601String();
 
@@ -259,9 +274,15 @@ class PolymarketDataClient
             'market_id' => $marketId !== '' ? $marketId : null,
             'token_id' => $tokenId !== '' ? $tokenId : null,
             'side' => $side,
+            'leader_role' => $leaderRole,
             'price' => $price,
             'size_usdc' => $sizeUsdc,
-            'raw' => $trade,
+            'raw' => array_merge($trade, [
+                'leader_role' => $leaderRole,
+                'proxy_wallet' => $proxyWallet !== '' ? $proxyWallet : null,
+                'maker_address' => $maker !== '' ? $maker : null,
+                'taker_address' => $taker !== '' ? $taker : null,
+            ]),
             'traded_at' => $time,
         ];
     }

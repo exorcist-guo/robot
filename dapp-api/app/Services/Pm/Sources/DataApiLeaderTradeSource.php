@@ -26,11 +26,21 @@ class DataApiLeaderTradeSource implements LeaderTradeSourceInterface
      */
     public function fetchTradesByUser(string $user, int $limit = 10, int $offset = 0): array
     {
-        return array_map(
-            // 把 Data API 原始 trade 结构转换成系统内部统一的成交字段格式。
-            fn (array $trade) => $this->dataClient->normalizeTrade($trade),
-            // 拉取指定用户的成交列表；默认取最新 10 条。
-            $this->dataClient->getTradesByUser($user, $limit, $offset)
-        );
+        $takerTrades = $this->dataClient->getTradesByUser($user, $limit, $offset, true);
+        $allTrades = $this->dataClient->getTradesByUser($user, $limit, $offset, false);
+
+
+        
+        $takerTradeIds = array_flip(array_map(
+            fn (array $trade) => (string) ($trade['id'] ?? $trade['trade_id'] ?? $trade['transactionHash'] ?? ''),
+            array_filter($takerTrades, 'is_array')
+        ));
+
+        return array_map(function (array $trade) use ($takerTradeIds) {
+            $tradeId = (string) ($trade['id'] ?? $trade['trade_id'] ?? $trade['transactionHash'] ?? '');
+            $trade['leader_role'] = $tradeId !== '' && isset($takerTradeIds[$tradeId]) ? 'taker' : 'maker';
+
+            return $this->dataClient->normalizeTrade($trade);
+        }, $allTrades);
     }
 }

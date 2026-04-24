@@ -15,6 +15,7 @@ use Dcat\Admin\Traits\HasDateTimeFormatter;
  * @property string|null $market_id
  * @property string|null $token_id Outcome token id
  * @property string $side BUY|SELL
+ * @property string|null $leader_role maker|taker
  * @property string|null $price 成交价(字符串)
  * @property int|null $size_usdc 成交金额USDC(1e6)
  * @property array|null $raw

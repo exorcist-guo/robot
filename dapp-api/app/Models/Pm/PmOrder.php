@@ -11,6 +11,8 @@ use Dcat\Admin\Traits\HasDateTimeFormatter;
  *
  * @property int $id 订单主键 ID
  * @property int $order_intent_id 关联的下单意图 ID
+ * @property string|null $leader_role maker|taker
+ * @property string|null $token_id outcome token id
  * @property string|null $poly_order_id Polymarket CLOB 订单 ID
  * @property string|null $exchange_nonce 交易所侧 nonce / 去重标识
  * @property int $status 本地下单状态：0=new 1=submitted 2=filled 3=partial 4=canceled 5=rejected 6=error

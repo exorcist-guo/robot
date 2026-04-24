@@ -31,6 +31,7 @@ use Dcat\Admin\Traits\HasDateTimeFormatter;
  * @property int $max_slippage_bps 最大滑点(bps)
  * @property bool $allow_partial_fill
  * @property int|null $daily_max_usdc 每日最大USDC(1e6)
+ * @property string|null $maker_max_quantity_per_token maker 跟单时单个 token 最大持仓数量
  * @property int $tail_order_usdc 扫尾盘固定下单金额(1e6)
  * @property string|null $tail_trigger_amount 扫尾盘触发阈值
  * @property int $tail_time_limit_seconds 最后多少秒允许触发

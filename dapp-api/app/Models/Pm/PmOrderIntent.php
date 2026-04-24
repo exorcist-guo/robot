@@ -16,6 +16,7 @@ use Dcat\Admin\Traits\HasDateTimeFormatter;
  * @property int $member_id
  * @property string $token_id
  * @property string $side BUY|SELL
+ * @property string|null $leader_role maker|taker
  * @property string|null $leader_price
  * @property int $target_usdc 目标USDC(1e6)
  * @property int $clamped_usdc 限制后USDC(1e6)
