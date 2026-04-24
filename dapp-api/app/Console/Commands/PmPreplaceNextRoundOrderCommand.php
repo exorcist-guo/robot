@@ -2,185 +2,252 @@
 
 namespace App\Console\Commands;
 
-use App\Jobs\PmExecuteOrderIntentJob;
-use App\Models\Pm\PmOrderIntent;
+use App\Models\Pm\PmCustodyWallet;
+use App\Models\Pm\PmSkipRoundOrder;
 use App\Services\Pm\GammaClient;
-use App\Services\Pm\PolymarketTradingService;
-use App\Services\Pm\TailSweepMarketDataService;
-use App\Services\Pm\TailSweepNextRoundService;
+use App\Services\Pm\PmPrivateKeyResolver;
+use App\Services\Pm\SkipRoundConfigProvider;
+use App\Services\Pm\SkipRoundExecutionService;
+use App\Services\Pm\SkipRoundLineStateService;
+use App\Services\Pm\SkipRoundMarketResolverService;
+use App\Services\Pm\SkipRoundPredictService;
 use Illuminate\Console\Command;
 
 class PmPreplaceNextRoundOrderCommand extends Command
 {
-    private const HARDCODED_CONFIG = [
-        'task_label' => 'member-7-btc-next-round',
-        'copy_task_id' => 0,
-        'member_id' => 7,
-        'market_slug' => 'btc-updown-5m-1775908800',
-        'market_id' => '1956222',
-        'market_question' => 'Bitcoin Up or Down - April 13, 5:20AM-5:25AM ET',
-        'market_symbol' => 'btc/usd',
-        'resolution_source' => 'https://data.chain.link/streams/btc-usd',
-        'token_yes_id' => '67911685367438010117412622161650549871800124791516212531878197495633969519784',
-        'token_no_id' => '94536462316742725904526691949689575556522574605021930087807817684758931474464',
-        'tail_order_usdc' => 10000000,
-        'max_slippage_bps' => 50,
-        'allow_partial_fill' => true,
-        'daily_max_usdc' => null,
-        'next_round_min_predict_diff' => '10',
-        'next_round_prepare_seconds' => 999999,
-    ];
-
+    /**
+     * 命令说明：
+     * 这是“隔一轮预测模块”的主入口。
+     *
+     * 它的职责不是直接自己拼所有交易细节，而是串联以下几个步骤：
+     * 1. 读取硬编码策略配置
+     * 2. 初始化策略主记录和 A/B 两条线状态
+     * 3. 读取开盘价并做模式1预测
+     * 4. 解析下一轮市场并落库
+     * 5. 创建本模块自己的订单记录
+     * 6. 调执行服务去挂单、轮询、撤单、补市价
+     * 7. 记录执行成功或失败的上下文
+     */
     protected $signature = 'pm:preplace-next-round-order {--once : 仅执行一次，便于调试}';
 
-    protected $description = '参考模式一信号，提前为下一轮市场创建真实下单意图';
+    /**
+     * 运行目标：
+     * 在当前轮接近结束时，按模式1信号去预测下一轮方向，
+     * 然后用 A/B 双线资金管理执行一笔下一轮订单。
+     */
+    protected $description = '隔一轮预测模块：A/B 双线预测下一轮并执行挂单、撤单、补单';
 
     public function handle(
+        SkipRoundConfigProvider $configProvider,
+        SkipRoundLineStateService $lineStateService,
+        SkipRoundPredictService $predictService,
+        SkipRoundMarketResolverService $marketResolver,
+        SkipRoundExecutionService $executionService,
         GammaClient $gammaClient,
-        TailSweepNextRoundService $nextRoundService,
-        TailSweepMarketDataService $marketData,
-        PolymarketTradingService $trading
+        PmPrivateKeyResolver $resolver,
     ): int {
+        // --once=true 表示只跑一轮，便于联调；否则常驻每 5 秒循环一次。
         $once = (bool) $this->option('once');
-        $config = self::HARDCODED_CONFIG;
+        $config = $configProvider->get();
 
         do {
+            /**
+             * 第一步：初始化策略和 A/B 两条线。
+             *
+             * bootstrap() 会确保：
+             * - pm_skip_round_strategies 存在当前策略主记录
+             * - pm_skip_round_strategy_lines 存在 A/B 两条线
+             * - 能取出当前这一次应该使用哪一条线下注
+             */
+            $boot = $lineStateService->bootstrap($config);
+            $strategy = $boot['strategy'];
+            $line = $boot['line'];
             $now = now();
-            $prepared = $nextRoundService->prepare($config, $gammaClient, $now);
-            if (($prepared['ok'] ?? false) !== true) {
-                $reason = (string) ($prepared['reason'] ?? 'unknown');
-                $context = collect($prepared)
-                    ->except(['ok'])
-                    ->map(fn ($value) => is_scalar($value) || $value === null ? $value : json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES))
-                    ->all();
-                $this->line(($config['task_label'] ?? 'hardcoded-task').' 跳过: '.$reason.' '.json_encode($context, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
 
+            /**
+             * 第二步：做模式1预测。
+             *
+             * 预测输入来自 pm_tail_sweep_round_open_prices：
+             * - 上一轮开盘价
+             * - 当前轮开盘价
+             *
+             * 预测输出包含：
+             * - signal_round_key
+             * - target_round_key
+             * - predicted_side
+             * - predict_diff / predict_abs_diff
+             */
+            $prediction = $predictService->predict($config, $now);
+
+            if (($prediction['ok'] ?? false) !== true) {
+                /**
+                 * 预测失败时直接跳过。
+                 * 常见原因：
+                 * - 当前轮价差没达到最小阈值
+                 * - 开盘价缺失
+                 * - slug 不支持
+                 */
+                $this->line(($config['strategy_key'] ?? 'skip-round').' 跳过: '.json_encode($prediction, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
                 if ($once) {
                     return self::SUCCESS;
                 }
-
                 sleep(5);
                 continue;
             }
 
-            $targetRoundKey = (string) ($prepared['target_round_key'] ?? '');
-            if ($targetRoundKey === '') {
+            /**
+             * 同一策略在同一 signal_round_key 上只处理一次，避免重复生成订单。
+             */
+            if ((string) ($strategy->last_signal_round_key ?? '') === (string) $prediction['signal_round_key']) {
                 if ($once) {
                     return self::SUCCESS;
                 }
-
                 sleep(5);
                 continue;
             }
 
-            $existingIntent = PmOrderIntent::query()
-                ->where('member_id', (int) $config['member_id'])
-                ->where('status', PmOrderIntent::STATUS_PENDING)
-                ->where('risk_snapshot->strategy', 'next_round_preorder')
-                ->where('risk_snapshot->target_round_key', $targetRoundKey)
+            /**
+             * 第三步：解析下一轮市场并落库。
+             *
+             * 这里会根据 base market slug + next round time：
+             * - 生成下一轮完整 slug
+             * - 查询 gamma market
+             * - 写入 pm_skip_round_markets
+             */
+            $resolved = $marketResolver->resolveAndStore($strategy, $config, $prediction, $gammaClient);
+            if (($resolved['ok'] ?? false) !== true) {
+                $strategy->last_error = (string) ($resolved['reason'] ?? 'market_resolve_failed');
+                $strategy->last_ran_at = now();
+                $strategy->save();
+                $this->line(($config['strategy_key'] ?? 'skip-round').' 跳过: '.json_encode($resolved, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+                if ($once) {
+                    return self::SUCCESS;
+                }
+                sleep(5);
+                continue;
+            }
+
+            /**
+             * 根据预测方向决定买哪一个 token：
+             * - up   -> token_yes_id
+             * - down -> token_no_id
+             */
+            $market = $resolved['market'];
+            $predictedSide = (string) $prediction['predicted_side'];
+            $tokenId = $predictedSide === 'up'
+                ? (string) ($market['token_yes_id'] ?? '')
+                : (string) ($market['token_no_id'] ?? '');
+
+            /**
+             * 防重复：
+             * 同一策略、同一目标轮次，只允许存在一条未失败/未结算的订单记录。
+             */
+            $existingOrder = PmSkipRoundOrder::query()
+                ->where('strategy_id', $strategy->id)
+                ->where('target_round_key', (string) $prediction['target_round_key'])
+                ->whereNotIn('status', [PmSkipRoundOrder::STATUS_FAILED, PmSkipRoundOrder::STATUS_SETTLED])
                 ->first();
-            if ($existingIntent) {
-                $this->line(($config['task_label'] ?? 'hardcoded-task').' 跳过: existing_pending_intent '.json_encode([
-                    'intent_id' => $existingIntent->id,
-                    'target_round_key' => $targetRoundKey,
-                ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
-
+            if ($existingOrder) {
                 if ($once) {
                     return self::SUCCESS;
                 }
-
                 sleep(5);
                 continue;
             }
 
-            $predictedSide = (string) $prepared['predicted_side'];
-            $side = PolymarketTradingService::SIDE_BUY;
-            $tokenId = (string) ($prepared['token_id'] ?? '');
-            if ($tokenId === '' || !$trading->isTokenTradable($tokenId)) {
-                $this->line(($config['task_label'] ?? 'hardcoded-task').' 跳过: token_not_tradable '.json_encode([
-                    'token_id' => $tokenId,
-                    'target_round_key' => $targetRoundKey,
-                ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
-
-                if ($once) {
-                    return self::SUCCESS;
-                }
-
-                sleep(5);
-                continue;
-            }
-
-            $books = [];
-            [$entryPrice, $entryPriceSource] = $marketData->resolveEntryPrice(
-                $trading,
-                $tokenId,
-                $side,
-                (string) $config['tail_order_usdc'],
-                $books
-            );
-            if (!preg_match('/^\d+(\.\d+)?$/', $entryPrice) || bccomp($entryPrice, '0', 8) <= 0) {
-                $this->line(($config['task_label'] ?? 'hardcoded-task').' 跳过: invalid_entry_price '.json_encode([
-                    'entry_price' => $entryPrice,
-                    'entry_price_source' => $entryPriceSource,
-                    'target_round_key' => $targetRoundKey,
-                ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
-
-                if ($once) {
-                    return self::SUCCESS;
-                }
-
-                sleep(5);
-                continue;
-            }
-
-            $nextMarket = is_array($prepared['next_market'] ?? null) ? $prepared['next_market'] : [];
-            $intent = PmOrderIntent::create([
-                'copy_task_id' => (int) $config['copy_task_id'],
-                'leader_trade_id' => null,
+            /**
+             * 第四步：创建本模块自己的订单记录。
+             *
+             * 注意：这里不写 pm_order_intents / pm_orders，
+             * 只写 pm_skip_round_orders。
+             */
+            $order = PmSkipRoundOrder::create([
+                'strategy_id' => $strategy->id,
+                'strategy_line_id' => $line->id,
                 'member_id' => (int) $config['member_id'],
+                'line_code' => $line->line_code,
+                'signal_round_key' => (string) $prediction['signal_round_key'],
+                'target_round_key' => (string) $prediction['target_round_key'],
+                'prediction_source_round_key' => (string) $prediction['prediction_round_key'],
+                'market_id' => (string) ($market['market_id'] ?? ''),
+                'market_slug' => (string) ($market['slug'] ?? ''),
                 'token_id' => $tokenId,
-                'side' => $side,
-                'leader_price' => $entryPrice,
-                'target_usdc' => (int) $config['tail_order_usdc'],
-                'clamped_usdc' => (int) $config['tail_order_usdc'],
-                'status' => PmOrderIntent::STATUS_PENDING,
-                'skip_reason' => null,
-                'risk_snapshot' => [
-                    'mode' => 'tail_sweep',
-                    'strategy' => 'next_round_preorder',
-                    'task_label' => (string) ($config['task_label'] ?? 'hardcoded-task'),
-                    'config_source' => 'hardcoded_command',
-                    'prediction_source' => 'mode1_open_price',
-                    'max_slippage_bps' => $config['max_slippage_bps'],
-                    'allow_partial_fill' => (bool) $config['allow_partial_fill'],
-                    'daily_max_usdc' => $config['daily_max_usdc'],
-                    'prediction_round_key' => (string) ($prepared['prediction_round_key'] ?? ''),
-                    'target_round_key' => $targetRoundKey,
-                    'prev_round_open_price' => (string) ($prepared['prev_round_open_price'] ?? '0'),
-                    'current_round_open_price' => (string) ($prepared['current_round_open_price'] ?? '0'),
-                    'predict_diff' => (string) ($prepared['predict_diff'] ?? '0'),
-                    'predict_abs_diff' => (string) ($prepared['predict_abs_diff'] ?? '0'),
-                    'predicted_side' => $predictedSide,
-                    'next_round_slug' => (string) ($prepared['next_round_slug'] ?? ''),
-                    'next_market_id' => (string) ($nextMarket['market_id'] ?? ''),
-                    'next_market_end_at' => (string) ($prepared['next_round_end'] ?? ''),
-                    'market_slug' => (string) ($nextMarket['slug'] ?? ''),
-                    'market_id' => (string) ($nextMarket['market_id'] ?? ''),
-                    'market_question' => (string) ($nextMarket['question'] ?? ''),
-                    'resolution_source' => (string) ($nextMarket['resolution_source'] ?? ''),
-                    'trigger_side' => $predictedSide,
-                    'token_yes_id' => (string) ($nextMarket['token_yes_id'] ?? ''),
-                    'token_no_id' => (string) ($nextMarket['token_no_id'] ?? ''),
-                    'entry_price' => $entryPrice,
-                    'entry_price_source' => $entryPriceSource,
-                    'remaining_seconds' => (int) ($prepared['remaining_seconds'] ?? 0),
-                    'input_config' => $config,
+                'predicted_side' => $predictedSide,
+                'order_side' => 'BUY',
+                'predict_diff' => (string) $prediction['predict_diff'],
+                'predict_abs_diff' => (string) $prediction['predict_abs_diff'],
+                'prev_round_open_price' => (string) $prediction['prev_round_open_price'],
+                'current_round_open_price' => (string) $prediction['current_round_open_price'],
+                'bet_amount' => (string) $line->current_bet_amount,
+                'status' => PmSkipRoundOrder::STATUS_PREDICTED,
+                'snapshot' => [
+                    'config' => $config,
+                    'prediction' => $prediction,
+                    'market' => $market,
                 ],
-                'price_time_limit' => 'mode1-next-round',
             ]);
 
-            PmExecuteOrderIntentJob::dispatch($intent->id);
-            $this->info(($config['task_label'] ?? 'hardcoded-task')." 已创建下一轮预下单意图: {$intent->id}");
+            /**
+             * 第五步：找到实际下单钱包。
+             * 如果当前 member 没有托管钱包，则本次订单直接记失败。
+             */
+            $wallet = PmCustodyWallet::with('apiCredentials')
+                ->where('member_id', (int) $config['member_id'])
+                ->first();
+            if (!$wallet) {
+                $order->status = PmSkipRoundOrder::STATUS_FAILED;
+                $order->fail_reason = 'missing_wallet';
+                $order->save();
+            } else {
+                // 先验证私钥/凭证可解析，再进入真实交易执行。
+                $resolver->resolve($wallet);
+                try {
+                    /**
+                     * 第六步：执行真实下单链路。
+                     *
+                     * execute() 内部会继续做：
+                     * - 查询盘口
+                     * - 在 asks 中选价格最大的档位挂 BUY 单
+                     * - 轮询挂单成交量
+                     * - 剩余时间 <5 秒时撤单
+                     * - 对剩余未成交金额执行市价补买
+                     */
+                    $executionService->execute($wallet, $order, $config, $market, (int) $prediction['current_round_end']);
+                    $strategy->last_signal_round_key = (string) $prediction['signal_round_key'];
+                    $strategy->last_target_round_key = (string) $prediction['target_round_key'];
+                    $strategy->last_ran_at = now();
+                    $strategy->last_error = null;
+                    $strategy->save();
+                    $lineStateService->rotate($strategy);
+                    $this->info(($config['strategy_key'] ?? 'skip-round')." 已创建并执行隔一轮订单: {$order->id}");
+                } catch (\Throwable $e) {
+                    /**
+                     * 真实交易过程中任何异常都要优雅落库，
+                     * 不能让订单一直停留在 predicted 状态。
+                     */
+                    $order->refresh();
+                    $order->status = PmSkipRoundOrder::STATUS_FAILED;
+                    $order->fail_reason = str_contains(strtolower($e->getMessage()), 'timed out')
+                        ? 'clob_connect_timeout'
+                        : 'execution_exception';
+                    $order->snapshot = array_merge($order->snapshot ?? [], [
+                        'execution_exception' => [
+                            'message' => $e->getMessage(),
+                            'class' => $e::class,
+                        ],
+                    ]);
+                    $order->save();
+
+                    $strategy->last_error = $order->fail_reason;
+                    $strategy->last_ran_at = now();
+                    $strategy->save();
+
+                    $this->error(($config['strategy_key'] ?? 'skip-round').' 执行失败: '.$e->getMessage());
+                    if ($once) {
+                        return self::FAILURE;
+                    }
+                }
+            }
 
             if ($once) {
                 return self::SUCCESS;

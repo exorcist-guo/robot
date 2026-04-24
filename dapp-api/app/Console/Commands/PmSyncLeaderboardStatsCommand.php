@@ -31,6 +31,8 @@ class PmSyncLeaderboardStatsCommand extends Command
             $this->syncDailyStats($user);
         }
 
+        $this->rebuildRanksFromDailyStats();
+
         $this->info('排行榜统计同步完成');
         return self::SUCCESS;
     }
@@ -295,6 +297,39 @@ class PmSyncLeaderboardStatsCommand extends Command
             ],
             $payload + ['raw' => $raw]
         );
+    }
+
+    private function rebuildRanksFromDailyStats(): void
+    {
+        $today = Carbon::today();
+        $latestStats = PmLeaderboardDailyStat::query()
+            ->where('stat_date', $today->toDateString())
+            ->get()
+            ->keyBy('leaderboard_user_id');
+
+        $weekSorted = $latestStats->sortByDesc(fn (PmLeaderboardDailyStat $stat) => [
+            (int) $stat->week_profit_amount_usdc,
+            (int) $stat->week_win_rate_bps,
+            (int) $stat->week_total_orders,
+        ])->values();
+
+        foreach ($weekSorted as $index => $stat) {
+            PmLeaderboardUser::query()
+                ->whereKey($stat->leaderboard_user_id)
+                ->update(['week_rank' => $index + 1]);
+        }
+
+        $monthSorted = $latestStats->sortByDesc(fn (PmLeaderboardDailyStat $stat) => [
+            (int) $stat->month_profit_amount_usdc,
+            (int) $stat->month_win_rate_bps,
+            (int) $stat->month_total_orders,
+        ])->values();
+
+        foreach ($monthSorted as $index => $stat) {
+            PmLeaderboardUser::query()
+                ->whereKey($stat->leaderboard_user_id)
+                ->update(['month_rank' => $index + 1]);
+        }
     }
 
     private function toUsdcAtomicFromDecimal(mixed $value): ?int
