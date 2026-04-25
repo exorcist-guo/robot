@@ -17,6 +17,21 @@ class PmSkipRoundOrder extends Model
     public const STATUS_SETTLED = 'settled';
     public const STATUS_FAILED = 'failed';
 
+    public const ACTIVE_STATUSES = [
+        self::STATUS_PREDICTED,
+        self::STATUS_MARKET_RESOLVED,
+        self::STATUS_LIMIT_SUBMITTED,
+        self::STATUS_PARTIALLY_FILLED,
+        self::STATUS_CANCEL_REQUESTED,
+        self::STATUS_MARKET_BUY_SUBMITTED,
+    ];
+
+    public const FINAL_STATUSES = [
+        self::STATUS_FILLED,
+        self::STATUS_SETTLED,
+        self::STATUS_FAILED,
+    ];
+
     protected $table = 'pm_skip_round_orders';
 
     protected $guarded = [];
@@ -39,5 +54,15 @@ class PmSkipRoundOrder extends Model
     public function line(): BelongsTo
     {
         return $this->belongsTo(PmSkipRoundStrategyLine::class, 'strategy_line_id');
+    }
+
+    public function isActive(): bool
+    {
+        return in_array((string) $this->status, self::ACTIVE_STATUSES, true);
+    }
+
+    public function isFinal(): bool
+    {
+        return in_array((string) $this->status, self::FINAL_STATUSES, true);
     }
 }

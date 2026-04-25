@@ -36,6 +36,7 @@ class CopyTaskController extends Controller
                 'max_slippage_bps',
                 'allow_partial_fill',
                 'daily_max_usdc',
+                'maker_max_quantity_per_token',
                 'tail_order_usdc',
                 'tail_trigger_amount',
                 'tail_time_limit_seconds',
@@ -67,6 +68,7 @@ class CopyTaskController extends Controller
                 'max_slippage_bps' => $t->max_slippage_bps,
                 'allow_partial_fill' => (bool) $t->allow_partial_fill,
                 'daily_max_usdc' => $t->daily_max_usdc === null ? null : ($t->daily_max_usdc / 1000000),
+                'maker_max_quantity_per_token' => $t->maker_max_quantity_per_token,
                 'tail_order_usdc' => $t->tail_order_usdc / 1000000,
                 'tail_trigger_amount' => $t->tail_trigger_amount,
                 'tail_time_limit_seconds' => $t->tail_time_limit_seconds,
@@ -121,7 +123,7 @@ class CopyTaskController extends Controller
         }
 
         $fields = [];
-        foreach (['ratio_bps', 'min_usdc', 'max_usdc'] as $k) {
+        foreach (['ratio_bps', 'min_usdc', 'max_usdc', 'maker_max_quantity_per_token'] as $k) {
             if ($request->has($k)) {
                 $fields[$k] = $request->input($k);
             }
@@ -139,6 +141,16 @@ class CopyTaskController extends Controller
         }
         if (isset($fields['max_usdc'])) {
             $fields['max_usdc'] = max(0, (int) round(((float) $fields['max_usdc']) * 1000000));
+        }
+        if (isset($fields['maker_max_quantity_per_token'])) {
+            $value = trim((string) $fields['maker_max_quantity_per_token']);
+            if ($value === '') {
+                $fields['maker_max_quantity_per_token'] = null;
+            } elseif (!preg_match('/^\d+(\.\d+)?$/', $value)) {
+                return $this->error('maker_max_quantity_per_token 不合法');
+            } else {
+                $fields['maker_max_quantity_per_token'] = $value;
+            }
         }
 
         $task->fill(array_merge($fields, $this->normalizeCommonRiskFieldsForPatch($request, true)));
@@ -194,6 +206,7 @@ class CopyTaskController extends Controller
         $ratioBps = (int) $request->input('ratio_bps', 10000);
         $minUsdc = max(0, (int) round(((float) $request->input('min_usdc', 0)) * 1000000));
         $maxUsdc = max(0, (int) round(((float) $request->input('max_usdc', 0)) * 1000000));
+        $makerMaxQuantityPerToken = trim((string) $request->input('maker_max_quantity_per_token', ''));
 
         if ($leaderId <= 0) {
             return $this->error('leader_id 必填');
@@ -205,6 +218,9 @@ class CopyTaskController extends Controller
         if ($ratioBps <= 0 || $ratioBps > 1000000) {
             return $this->error('ratio_bps 不合法');
         }
+        if ($makerMaxQuantityPerToken !== '' && !preg_match('/^\d+(\.\d+)?$/', $makerMaxQuantityPerToken)) {
+            return $this->error('maker_max_quantity_per_token 不合法');
+        }
 
         $payload = array_merge($this->normalizeCommonRiskFieldsForCreate($request, false), [
             'mode' => PmCopyTask::MODE_LEADER_COPY,
@@ -212,6 +228,7 @@ class CopyTaskController extends Controller
             'ratio_bps' => $ratioBps,
             'min_usdc' => max(0, $minUsdc),
             'max_usdc' => max(0, $maxUsdc),
+            'maker_max_quantity_per_token' => $makerMaxQuantityPerToken !== '' ? $makerMaxQuantityPerToken : null,
         ]);
 
         $task = PmCopyTask::withTrashed()
@@ -368,7 +385,7 @@ class CopyTaskController extends Controller
             $fields['allow_partial_fill'] = (bool) $request->input('allow_partial_fill', true);
         }
 
-        if ($preserveWhenMissing && !$request->has('daily_max_usdc')) {
+        if ($preserveWhenMissing && !$request->has('daily_max_usdc') && !$request->has('maker_max_quantity_per_token')) {
             return $fields;
         }
 
@@ -380,6 +397,15 @@ class CopyTaskController extends Controller
         }
 
         $fields['daily_max_usdc'] = $dailyMaxUsdc;
+
+        if (!$preserveWhenMissing || $request->has('maker_max_quantity_per_token')) {
+            $makerMaxQuantityPerToken = trim((string) $request->input('maker_max_quantity_per_token', ''));
+            if ($makerMaxQuantityPerToken === '') {
+                $fields['maker_max_quantity_per_token'] = null;
+            } elseif (preg_match('/^\d+(\.\d+)?$/', $makerMaxQuantityPerToken)) {
+                $fields['maker_max_quantity_per_token'] = $makerMaxQuantityPerToken;
+            }
+        }
 
         return $fields;
     }

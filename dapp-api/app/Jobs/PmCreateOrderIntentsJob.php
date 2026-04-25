@@ -8,6 +8,7 @@ use App\Services\Pm\CopyIntentSizingService;
 use App\Services\Pm\PolymarketTradingService;
 use App\Services\Pm\PurchaseTrackingService;
 use Brick\Math\BigDecimal;
+use Brick\Math\RoundingMode;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -54,7 +55,11 @@ class PmCreateOrderIntentsJob implements ShouldQueue
                     (string) $trade->token_id
                 );
                 $plannedQuantity = (string) ($sizingResult['planned_quantity'] ?? '0');
-                $nextOpenQuantity = BigDecimal::of($currentOpenQuantity)->plus(BigDecimal::of($plannedQuantity))->toScale(8, \Brick\Math\RoundingMode::DOWN)->stripTrailingZeros()->__toString();
+                $nextOpenQuantity = BigDecimal::of($currentOpenQuantity)
+                    ->plus(BigDecimal::of($plannedQuantity))
+                    ->toScale(8, RoundingMode::DOWN)
+                    ->stripTrailingZeros()
+                    ->__toString();
 
                 if (bccomp($nextOpenQuantity, $makerLimit, 8) === 1) {
                     $sizingResult['status'] = PmOrderIntent::STATUS_SKIPPED;
@@ -77,7 +82,7 @@ class PmCreateOrderIntentsJob implements ShouldQueue
                     'member_id' => $task->member_id,
                     'token_id' => (string) $trade->token_id,
                     'side' => (string) $trade->side,
-                    'leader_role' => $leaderRole,
+                    'leader_role' => $leaderRole !== '' ? $leaderRole : null,
                     'leader_price' => $trade->price,
                     'target_usdc' => (int) $sizingResult['target_usdc'],
                     'clamped_usdc' => (int) $sizingResult['clamped_usdc'],
@@ -85,9 +90,10 @@ class PmCreateOrderIntentsJob implements ShouldQueue
                     'skip_reason' => $sizingResult['skip_reason'],
                     'skip_category' => $sizingResult['skip_reason'] ? 'sizing' : null,
                     'risk_snapshot' => $sizingResult['risk_snapshot'],
-                    'decision_payload' => [
-                        'sizing' => $sizingResult,
-                    ],
+                    'decision_payload' => array_merge(
+                        is_array($intent?->decision_payload ?? null) ? $intent->decision_payload : [],
+                        ['sizing' => $sizingResult]
+                    ),
                     'execution_mode' => (bool) config('pm.copy_dry_run', false) ? 'dry_run' : 'live',
                     'execution_stage' => 'queued',
                 ]

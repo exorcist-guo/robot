@@ -30,6 +30,7 @@ const form = reactive({
   ratio_bps: 10000,
   min_usdc: 0,
   max_usdc: 0,
+  maker_max_quantity_per_token: '',
   tail_order_usdc: 0,
   tail_trigger_amount: '200',
   tail_time_limit_seconds: 30,
@@ -41,6 +42,7 @@ const editForm = reactive({
   ratio_bps: 10000,
   min_usdc: 0,
   max_usdc: 0,
+  maker_max_quantity_per_token: '',
   tail_order_usdc: 0,
   tail_trigger_amount: '200',
   tail_time_limit_seconds: 30,
@@ -153,6 +155,7 @@ const saveTask = async () => {
         ratio_bps: form.ratio_bps,
         min_usdc: form.min_usdc,
         max_usdc: form.max_usdc,
+        maker_max_quantity_per_token: form.maker_max_quantity_per_token,
       })
     } else {
       if (!marketResolved.value) {
@@ -277,6 +280,7 @@ const openEditDialog = (task: any) => {
     editForm.ratio_bps = task.ratio_bps || 10000
     editForm.min_usdc = parseInt(task.min_usdc) || 0
     editForm.max_usdc = parseInt(task.max_usdc) || 0
+    editForm.maker_max_quantity_per_token = task.maker_max_quantity_per_token || ''
   }
   showEditDialog.value = true
 }
@@ -317,6 +321,7 @@ const saveEdit = async () => {
       payload.ratio_bps = editForm.ratio_bps
       payload.min_usdc = editForm.min_usdc
       payload.max_usdc = editForm.max_usdc
+      payload.maker_max_quantity_per_token = editForm.maker_max_quantity_per_token
     }
 
     console.log('保存编辑 payload:', payload)
@@ -368,6 +373,7 @@ onMounted(() => {
           <van-field v-model.number="form.ratio_bps" label="比例(bps)" type="number" />
           <van-field v-model.number="form.min_usdc" label="最小USDC" type="number" />
           <van-field v-model.number="form.max_usdc" label="最大USDC" type="number" />
+          <van-field v-model="form.maker_max_quantity_per_token" label="Maker单Token最大数量" />
         </template>
         <template v-else>
           <van-field v-model="form.market_input" label="市场链接/Slug" placeholder="https://polymarket.com/... 或 slug" />
@@ -466,7 +472,7 @@ onMounted(() => {
             {{ item.mode === 'tail_sweep_many' ? '扫尾盘(多单)' : '扫尾盘(单单)' }} / 金额={{ item.tail_order_usdc }} / 阈值={{ item.tail_trigger_amount }} / 时间={{ item.tail_time_limit_seconds }}秒 / 已亏损={{ item.tail_loss_count }}/{{ item.tail_loss_stop_count }}
           </div>
           <div class="task-card__detail" v-else>
-            跟单 / ratio={{ item.ratio_bps }}, min={{ item.min_usdc }}, max={{ item.max_usdc }}
+            跟单 / ratio={{ item.ratio_bps }}, min={{ item.min_usdc }}, max={{ item.max_usdc }}, maker上限={{ item.maker_max_quantity_per_token || '不限' }}
           </div>
           <div class="task-card__actions">
             <van-button
@@ -528,6 +534,7 @@ onMounted(() => {
           <van-field v-model.number="editForm.ratio_bps" label="比例(bps)" type="number" />
           <van-field v-model.number="editForm.min_usdc" label="最小USDC" type="number" />
           <van-field v-model.number="editForm.max_usdc" label="最大USDC" type="number" />
+          <van-field v-model="editForm.maker_max_quantity_per_token" label="Maker单Token最大数量" />
         </template>
       </van-cell-group>
     </van-dialog>

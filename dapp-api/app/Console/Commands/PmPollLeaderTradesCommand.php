@@ -87,7 +87,7 @@ class PmPollLeaderTradesCommand extends Command
             }
 
             // 调试输出：打印成交时间和归一化后的完整结构，便于排查来源数据异常。
-            var_dump(date('Y-m-d H:i:s', $normalized['traded_at']), $normalized);
+            // var_dump(date('Y-m-d H:i:s', $normalized['traded_at']), $normalized);
             $model = PmLeaderTrade::updateOrCreate(
                 ['trade_id' => $normalized['trade_id']],
                 array_merge($normalized, [
