@@ -499,12 +499,21 @@ class PolymarketTradingService
         );
 
         $balanceUnits = (string) ($raw['balance'] ?? '0');
+        $allowances = is_array($raw['allowances'] ?? null) ? $raw['allowances'] : [];
+        $allowanceValues = array_map(static fn ($value) => (string) $value, $allowances);
         $hasBalance = $this->isPositiveInteger($balanceUnits);
+        $hasAllowance = collect($allowanceValues)
+            ->contains(fn (string $value) => $this->isPositiveInteger($value) || $this->isPositiveDecimal($value));
         $checks = [
             [
                 'code' => 'position_balance',
                 'passed' => $hasBalance,
                 'value' => $balanceUnits,
+            ],
+            [
+                'code' => 'position_allowance',
+                'passed' => $hasAllowance,
+                'value' => $allowances,
             ],
         ];
 
@@ -518,6 +527,12 @@ class PolymarketTradingService
                 'passed' => bccomp($balanceUnits, $requiredUnits, 0) >= 0,
                 'value' => $requiredUnits,
             ];
+            $checks[] = [
+                'code' => 'position_required_allowance',
+                'passed' => collect($allowanceValues)
+                    ->contains(fn (string $value) => bccomp(preg_match('/^\d+(\.\d+)?$/', $value) === 1 ? $value : '0', $requiredUnits, 0) >= 0),
+                'value' => $requiredUnits,
+            ];
         }
 
         foreach ($checks as $check) {
@@ -525,9 +540,12 @@ class PolymarketTradingService
                 return [
                     'side' => $side,
                     'is_ready' => false,
-                    'failure_code' => 'insufficient_position_balance',
+                    'failure_code' => str_contains((string) $check['code'], 'allowance')
+                        ? 'insufficient_position_allowance'
+                        : 'insufficient_position_balance',
                     'checks' => $checks,
                     'balance' => $balanceUnits,
+                    'allowances' => $allowances,
                 ];
             }
         }
@@ -538,6 +556,7 @@ class PolymarketTradingService
             'failure_code' => null,
             'checks' => $checks,
             'balance' => $balanceUnits,
+            'allowances' => $allowances,
         ];
     }
 
@@ -720,11 +739,16 @@ class PolymarketTradingService
         $feeRateBps = (string) ($params['fee_rate_bps']
             ?? $feeResp['feeRateBps']
             ?? $feeResp['fee_rate_bps']
+            ?? $feeResp['base_fee']
             ?? null);
         if (!preg_match('/^\d+$/', $feeRateBps) || $feeRateBps === '0') {
-            $feeRateBps = strtoupper($side) === self::SIDE_BUY
+            $isMarketable = $this->isMarketableOrder($side, $price, is_array($book) ? $book : []);
+            $fallbackFeeRateBps = strtoupper($side) === self::SIDE_BUY
                 ? $takerFeeRateBps
-                : ($this->isMarketableOrder($side, $price, is_array($book) ? $book : []) ? $takerFeeRateBps : $makerFeeRateBps);
+                : ($isMarketable ? $takerFeeRateBps : $makerFeeRateBps);
+            $feeRateBps = preg_match('/^\d+$/', $fallbackFeeRateBps) === 1 && $fallbackFeeRateBps !== '0'
+                ? $fallbackFeeRateBps
+                : (string) ($feeResp['base_fee'] ?? $defaultFeeRateBps);
         }
         if (!preg_match('/^\d+$/', $feeRateBps)) {
             $feeRateBps = $defaultFeeRateBps;

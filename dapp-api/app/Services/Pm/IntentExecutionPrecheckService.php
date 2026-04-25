@@ -95,8 +95,34 @@ class IntentExecutionPrecheckService
             }
         }
 
-        $sizeScale = $side === PolymarketTradingService::SIDE_BUY ? 2 : 4;
-        $size = $usdc->dividedBy($executionPrice, $sizeScale, RoundingMode::DOWN);
+        $sizeScale = 2;
+        if ($side === PolymarketTradingService::SIDE_SELL) {
+            $positionReadiness = $this->trading->getTradingReadiness(
+                $wallet,
+                $side,
+                (string) $intent->token_id,
+                null,
+                null,
+            );
+            if (($positionReadiness['is_ready'] ?? false) !== true && ($positionReadiness['failure_code'] ?? null) !== 'insufficient_position_balance') {
+                return $this->failure((string) ($positionReadiness['failure_code'] ?? 'trade_not_ready'), [
+                    'readiness' => $positionReadiness,
+                ]);
+            }
+
+            $balanceUnits = (string) ($positionReadiness['balance'] ?? '0');
+            if (preg_match('/^\d+$/', $balanceUnits) !== 1 || bccomp($balanceUnits, '0', 0) <= 0) {
+                return $this->failure('insufficient_position_balance', [
+                    'readiness' => $positionReadiness,
+                ]);
+            }
+
+            $size = BigDecimal::of($balanceUnits)
+                ->dividedBy('1000000', $sizeScale, RoundingMode::DOWN);
+            $usdc = $size->multipliedBy($executionPrice)->toScale(6, RoundingMode::DOWN);
+        } else {
+            $size = $usdc->dividedBy($executionPrice, $sizeScale, RoundingMode::DOWN);
+        }
         $minOrderSize = isset($marketPriceQuote['min_size']) && preg_match('/^\d+(\.\d+)?$/', (string) $marketPriceQuote['min_size'])
             ? BigDecimal::of((string) $marketPriceQuote['min_size'])
             : null;
@@ -125,8 +151,13 @@ class IntentExecutionPrecheckService
             ]);
         }
 
-        $cacheKey = 'wallet_readiness:' . $wallet->id . ':' . $side;
-        $cachedReadiness = Cache::get($cacheKey);
+        $cacheKey = 'wallet_readiness:' . $wallet->id . ':' . $side . ':' . ($side === PolymarketTradingService::SIDE_SELL ? (string) $intent->token_id : 'collateral');
+        $cachedReadiness = null;
+        try {
+            $cachedReadiness = Cache::get($cacheKey);
+        } catch (\Throwable) {
+            $cachedReadiness = null;
+        }
         if ($cachedReadiness && ($cachedReadiness['is_ready'] ?? false) === true) {
             $readiness = $cachedReadiness;
         } else {
@@ -138,35 +169,12 @@ class IntentExecutionPrecheckService
                 $normalizedSize,
             );
             if (($readiness['is_ready'] ?? false) === true) {
-                Cache::put($cacheKey, array_merge($readiness, [
-                    'side' => $side,
-                    'cached_at' => now()->toDateTimeString(),
-                ]), 300);
-            }
-        }
-
-        if (($readiness['is_ready'] ?? false) !== true && $side === PolymarketTradingService::SIDE_SELL && ($readiness['failure_code'] ?? null) === 'insufficient_position_balance') {
-            $balanceUnits = (string) ($readiness['balance'] ?? '0');
-            if (preg_match('/^\d+$/', $balanceUnits) === 1 && bccomp($balanceUnits, '0', 0) === 1) {
-                $balanceSize = BigDecimal::of($balanceUnits)
-                    ->dividedBy('1000000', 8, RoundingMode::DOWN)
-                    ->stripTrailingZeros();
-
-                if ($balanceSize->isGreaterThan(BigDecimal::zero())) {
-                    $size = $balanceSize;
-                    $normalizedSize = $size->stripTrailingZeros()->__toString();
-                    $normalizedNotional = BigDecimal::of($normalizedPrice)
-                        ->multipliedBy($normalizedSize)
-                        ->toScale(6, RoundingMode::DOWN);
-                    $usdc = $normalizedNotional;
-
-                    $readiness = $this->trading->getTradingReadiness(
-                        $wallet,
-                        $side,
-                        (string) $intent->token_id,
-                        $normalizedPrice,
-                        $normalizedSize,
-                    );
+                try {
+                    Cache::put($cacheKey, array_merge($readiness, [
+                        'side' => $side,
+                        'cached_at' => now()->toDateTimeString(),
+                    ]), 300);
+                } catch (\Throwable) {
                 }
             }
         }

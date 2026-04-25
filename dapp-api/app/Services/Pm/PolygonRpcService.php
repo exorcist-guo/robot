@@ -78,6 +78,11 @@ class PolygonRpcService
         return (string) $this->call('eth_gasPrice', []);
     }
 
+    public function estimateGas(array $transaction, string $tag = 'latest'): int
+    {
+        return $this->rpcQuantityToInt($this->call('eth_estimateGas', [$transaction, $tag]));
+    }
+
     public function sendRawTransaction(string $signedTx): string
     {
         return (string) $this->call('eth_sendRawTransaction', [$signedTx]);

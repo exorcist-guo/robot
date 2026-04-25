@@ -22,7 +22,7 @@ class PmTransferAssetCommand extends Command
 
     public function handle(PmPrivateKeyResolver $resolver, PolygonRpcService $rpc): int
     {
-        return '错误';
+        // return '错误';
         $wallet = $this->resolveWallet();
         if (!$wallet) {
             return self::FAILURE;
@@ -62,8 +62,14 @@ class PmTransferAssetCommand extends Command
             $from = strtolower($credential->getAddress());
             $nonce = $rpc->getTransactionCount($from, 'pending');
             $gasPriceHex = $rpc->gasPrice();
-            $gasLimit = 70000;
             $data = $this->encodeErc20Transfer($to, $amountBaseUnits);
+            $estimatedGas = $rpc->estimateGas([
+                'from' => $from,
+                'to' => $tokenAddress,
+                'value' => $this->toRpcHex(0),
+                'data' => $data,
+            ], 'pending');
+            $gasLimit = max(70000, (int) ceil($estimatedGas * 1.3));
 
             $raw = [
                 'nonce' => $this->toRpcHex($nonce),
@@ -85,6 +91,7 @@ class PmTransferAssetCommand extends Command
             $this->line('  amount_base_units: ' . $amountBaseUnits);
             $this->line('  nonce: ' . $nonce);
             $this->line('  gas_price: ' . $gasPriceHex);
+            $this->line('  estimated_gas: ' . $estimatedGas);
             $this->line('  gas_limit: ' . $gasLimit);
             $this->line('  data: ' . $data);
 
