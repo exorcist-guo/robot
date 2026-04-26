@@ -12,6 +12,7 @@ const deletingTaskId = ref<number | null>(null)
 const togglingTaskId = ref<number | null>(null)
 const editingTask = ref<any>(null)
 const showEditDialog = ref(false)
+const saveEditLoading = ref(false)
 const leaders = ref<any[]>([])
 const form = reactive({
   mode: 'leader_copy',
@@ -294,8 +295,9 @@ const removePriceTimeRule = (index: number) => {
 }
 
 const saveEdit = async () => {
-  if (!editingTask.value) return
+  if (!editingTask.value || saveEditLoading.value) return
 
+  saveEditLoading.value = true
   try {
     const payload: any = {}
     if (editingTask.value.mode === 'tail_sweep' || editingTask.value.mode === 'tail_sweep_many') {
@@ -332,6 +334,8 @@ const saveEdit = async () => {
   } catch (error: any) {
     console.error('保存失败:', error)
     showFailToast(error.response?.data?.msg || error.message || '更新失败')
+  } finally {
+    saveEditLoading.value = false
   }
 }
 
@@ -507,7 +511,7 @@ onMounted(() => {
       <div v-else class="surface-card empty-state">暂无任务，创建成功后可在此点击切换启用或暂停状态。</div>
     </section>
 
-    <van-dialog v-model:show="showEditDialog" title="编辑任务" show-cancel-button @confirm="saveEdit">
+    <van-dialog v-model:show="showEditDialog" title="编辑任务" :show-confirm-button="false" :show-cancel-button="false">
       <van-cell-group inset style="margin: 16px 0;">
         <template v-if="editingTask?.mode === 'tail_sweep' || editingTask?.mode === 'tail_sweep_many'">
           <van-field v-model.number="editForm.tail_order_usdc" label="下单金额(USDC)" type="number" />
@@ -537,6 +541,10 @@ onMounted(() => {
           <van-field v-model="editForm.maker_max_quantity_per_token" label="Maker单Token最大数量" />
         </template>
       </van-cell-group>
+      <div style="display: flex; gap: 12px; padding: 0 16px 16px;">
+        <van-button block plain @click="showEditDialog = false">取消</van-button>
+        <van-button block type="primary" :loading="saveEditLoading" @click="saveEdit">保存</van-button>
+      </div>
     </van-dialog>
 
     <van-action-sheet v-model:show="showModeSelect" :actions="modeOptions" @select="(item: any) => { form.mode = item.value; showModeSelect = false }" />

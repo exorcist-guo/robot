@@ -54,8 +54,15 @@ class PmCreateOrderIntentsJob implements ShouldQueue
                     (int) $task->id,
                     (string) $trade->token_id
                 );
+                $pendingBuyQuantity = $purchaseTrackingService->getPendingBuyQuantityByToken(
+                    (int) $task->member_id,
+                    (int) $task->id,
+                    (string) $trade->token_id,
+                    (int) $trade->id
+                );
                 $plannedQuantity = (string) ($sizingResult['planned_quantity'] ?? '0');
                 $nextOpenQuantity = BigDecimal::of($currentOpenQuantity)
+                    ->plus(BigDecimal::of($pendingBuyQuantity))
                     ->plus(BigDecimal::of($plannedQuantity))
                     ->toScale(8, RoundingMode::DOWN)
                     ->stripTrailingZeros()
@@ -67,6 +74,7 @@ class PmCreateOrderIntentsJob implements ShouldQueue
                     $sizingResult['risk_snapshot'] = array_merge($sizingResult['risk_snapshot'] ?? [], [
                         'maker_current_open_quantity' => $currentOpenQuantity,
                         'maker_planned_quantity' => $plannedQuantity,
+                        'maker_pending_buy_quantity' => $pendingBuyQuantity,
                         'maker_next_open_quantity' => $nextOpenQuantity,
                         'maker_max_quantity_per_token' => $makerLimit,
                     ]);

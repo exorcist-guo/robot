@@ -3,6 +3,7 @@
 namespace App\Services\Pm;
 
 use App\Models\Pm\PmOrder;
+use App\Models\Pm\PmOrderIntent;
 use App\Models\Pm\PmPurchaseTracking;
 use Brick\Math\BigDecimal;
 use Brick\Math\RoundingMode;
@@ -125,6 +126,51 @@ class PurchaseTrackingService
                 }
 
                 return $carry->plus(BigDecimal::of($remaining));
+            }, BigDecimal::zero());
+
+        return $total->toScale(8, RoundingMode::DOWN)->stripTrailingZeros()->__toString();
+    }
+
+    public function getPendingBuyQuantityByToken(int $memberId, int $copyTaskId, string $tokenId, ?int $excludeLeaderTradeId = null): string
+    {
+        $tokenId = trim($tokenId);
+        if ($memberId <= 0 || $copyTaskId <= 0 || $tokenId === '') {
+            return '0';
+        }
+
+        $trackedIntentIds = PmPurchaseTracking::query()
+            ->where('member_id', $memberId)
+            ->where('copy_task_id', $copyTaskId)
+            ->where('token_id', $tokenId)
+            ->whereNotNull('order_intent_id')
+            ->pluck('order_intent_id')
+            ->filter()
+            ->map(fn ($id) => (int) $id)
+            ->all();
+
+        $query = PmOrderIntent::query()
+            ->where('member_id', $memberId)
+            ->where('copy_task_id', $copyTaskId)
+            ->where('token_id', $tokenId)
+            ->where('side', PolymarketTradingService::SIDE_BUY)
+            ->whereIn('status', [PmOrderIntent::STATUS_PENDING, PmOrderIntent::STATUS_SUBMITTED]);
+
+        if ($excludeLeaderTradeId !== null) {
+            $query->where('leader_trade_id', '!=', $excludeLeaderTradeId);
+        }
+
+        if ($trackedIntentIds !== []) {
+            $query->whereNotIn('id', $trackedIntentIds);
+        }
+
+        $total = $query->get()
+            ->reduce(function (BigDecimal $carry, PmOrderIntent $intent) {
+                $planned = (string) ($intent->risk_snapshot['planned_quantity'] ?? $intent->decision_payload['sizing']['planned_quantity'] ?? '0');
+                if (preg_match('/^\d+(\.\d+)?$/', $planned) !== 1 || bccomp($planned, '0', 8) <= 0) {
+                    return $carry;
+                }
+
+                return $carry->plus(BigDecimal::of($planned));
             }, BigDecimal::zero());
 
         return $total->toScale(8, RoundingMode::DOWN)->stripTrailingZeros()->__toString();
