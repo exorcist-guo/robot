@@ -58,7 +58,7 @@ class PmCreateOrderIntentsJob implements ShouldQueue
                     (int) $task->member_id,
                     (int) $task->id,
                     (string) $trade->token_id,
-                    (int) $trade->id
+                    $intent?->id
                 );
                 $plannedQuantity = (string) ($sizingResult['planned_quantity'] ?? '0');
                 $nextOpenQuantity = BigDecimal::of($currentOpenQuantity)

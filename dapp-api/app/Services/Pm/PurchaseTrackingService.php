@@ -131,7 +131,7 @@ class PurchaseTrackingService
         return $total->toScale(8, RoundingMode::DOWN)->stripTrailingZeros()->__toString();
     }
 
-    public function getPendingBuyQuantityByToken(int $memberId, int $copyTaskId, string $tokenId, ?int $excludeLeaderTradeId = null): string
+    public function getPendingBuyQuantityByToken(int $memberId, int $copyTaskId, string $tokenId, ?int $excludeIntentId = null): string
     {
         $tokenId = trim($tokenId);
         if ($memberId <= 0 || $copyTaskId <= 0 || $tokenId === '') {
@@ -155,8 +155,8 @@ class PurchaseTrackingService
             ->where('side', PolymarketTradingService::SIDE_BUY)
             ->whereIn('status', [PmOrderIntent::STATUS_PENDING, PmOrderIntent::STATUS_SUBMITTED]);
 
-        if ($excludeLeaderTradeId !== null) {
-            $query->where('leader_trade_id', '!=', $excludeLeaderTradeId);
+        if ($excludeIntentId !== null) {
+            $query->where('id', '!=', $excludeIntentId);
         }
 
         if ($trackedIntentIds !== []) {
