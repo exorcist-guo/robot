@@ -15,7 +15,7 @@ class PmLeaderboardUserTradeController extends AdminController
     {
         return $content
             ->header('PmLeaderboardUserTrade 管理')
-            ->description('排行榜订单列表')
+            ->description('排行榜用户列表')
             ->breadcrumb(['text' => 'PmLeaderboardUserTrade 管理', 'url' => ''])
             ->body($this->grid());
     }

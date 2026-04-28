@@ -395,6 +395,40 @@ class PolymarketDataClient
     }
 
     /**
+     * 从 positions 列表中按 token_id 找 leader 当前持仓数量。
+     * 返回字符串数量，找不到时返回 '0'。
+     *
+     * @param array<int,array<string,mixed>> $positions
+     */
+    public function resolvePositionSizeByToken(array $positions, string $tokenId): string
+    {
+        $tokenId = trim($tokenId);
+        if ($tokenId === '') {
+            return '0';
+        }
+
+        foreach ($positions as $position) {
+            if (!is_array($position)) {
+                continue;
+            }
+
+            $asset = trim((string) ($position['asset'] ?? ''));
+            if ($asset !== $tokenId) {
+                continue;
+            }
+
+            $size = trim((string) ($position['size'] ?? '0'));
+            if (preg_match('/^\d+(\.\d+)?$/', $size) === 1) {
+                return $size;
+            }
+
+            return '0';
+        }
+
+        return '0';
+    }
+
+    /**
      * 单次模式读取指定 symbol 的一条实时价格。
      * 主要用于兼容旧逻辑或调试；常驻 daemon 不走这个方法。
      *

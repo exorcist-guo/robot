@@ -23,6 +23,12 @@ class PmExecuteOrderIntentJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
+    /**
+     * 最多尝试 3 次。
+     *
+     * 这里只针对网络波动、远端临时异常这类可重试问题重试，
+     * 余额、授权、精度、参数不合法这类问题不会靠重试解决。
+     */
     public int $tries = 3;
 
     public function __construct(private readonly int $intentId)
@@ -31,12 +37,21 @@ class PmExecuteOrderIntentJob implements ShouldQueue
 
     /**
      * @return array<int,int>
+     *
+     * 重试退避时间：第一次失败后等 5 秒，
+     * 第二次失败后等 15 秒，第三次失败后等 30 秒。
      */
     public function backoff(): array
     {
         return [5, 15, 30];
     }
 
+    /**
+     * Job 入口。
+     *
+     * 这里先抢一个分布式锁，避免同一个 intent 被多个 worker 同时执行，
+     * 否则会出现重复下单、重复写订单记录的问题。
+     */
     public function handle(
         PolymarketTradingService $trading,
         IntentExecutionPrecheckService $precheckService,
@@ -57,12 +72,25 @@ class PmExecuteOrderIntentJob implements ShouldQueue
         }
     }
 
+    /**
+     * 真正的执行主流程。
+     *
+     * 执行顺序大致是：
+     * 1. 读取并校验 intent
+     * 2. 检查任务状态 / 钱包状态
+     * 3. SELL 时必要的话自动补授权
+     * 4. 做 precheck（价格、深度、余额、授权、滑点等）
+     * 5. 提交订单到 Polymarket
+     * 6. 保存本地订单与意图状态
+     * 7. 必要时派发后续同步任务
+     */
     private function runHandle(
         PolymarketTradingService $trading,
         IntentExecutionPrecheckService $precheckService,
         PurchaseTrackingService $purchaseTrackingService
     ): void {
         $intent = PmOrderIntent::with(['copyTask', 'member.custodyWallet.apiCredentials', 'leaderTrade'])->find($this->intentId);
+        // 只处理 pending 状态的 intent，已经提交/跳过/失败的 intent 直接返回，避免重复执行。
         if (!$intent || $intent->status !== PmOrderIntent::STATUS_PENDING) {
             return;
         }
@@ -88,12 +116,16 @@ class PmExecuteOrderIntentJob implements ShouldQueue
 
         if (
             strtoupper((string) $intent->side) === PolymarketTradingService::SIDE_SELL
+            // 卖单优先检查并自动补 token 授权，授权提交后本次先结束，等待后续重试再真正下单。
             && $this->autoApproveSellAllowanceIfNeeded($intent, $wallet, $trading)
         ) {
             return;
         }
 
         $precheck = $precheckService->evaluate($intent, $wallet, $copyTask);
+        // precheck 失败时，不是所有情况都记为 failed：
+        // - 市场没深度、滑点过大、触发策略跳过，记 skipped
+        // - 余额/授权/交易准备不满足，记 failed，方便后台明确看到阻塞原因
         if (($precheck['ok'] ?? false) !== true) {
             $reason = (string) ($precheck['reason'] ?? 'precheck_failed');
             $context = is_array($precheck['context'] ?? null) ? $precheck['context'] : [];
@@ -153,6 +185,7 @@ class PmExecuteOrderIntentJob implements ShouldQueue
         }
 
         try {
+            // 到这里说明本地下单参数已经准备好，正式调用 Polymarket CLOB 提交订单。
             $result = $trading->placeOrder($wallet, $requestPayload);
 
             $remoteStatus = $this->mapRemoteStatus($result['response'] ?? []);
@@ -182,10 +215,12 @@ class PmExecuteOrderIntentJob implements ShouldQueue
             );
 
             if (in_array($remoteStatus, [PmOrder::STATUS_FILLED, PmOrder::STATUS_PARTIAL], true)) {
+                // BUY 成交后，把这笔买单写入 purchase tracking，后续卖出时才能知道有哪些仓位可分配。
                 $purchaseTrackingService->recordBuyOrder($savedOrder);
             }
 
             if ($side === PolymarketTradingService::SIDE_SELL && in_array($remoteStatus, [PmOrder::STATUS_FILLED, PmOrder::STATUS_PARTIAL], true)) {
+                // SELL 成交后，把卖出的数量分摊到历史买入批次，更新 remaining_size。
                 $filledSize = $savedOrder->response_payload['size_matched'] ?? $savedOrder->response_payload['filled_size'] ?? $requestContext['normalized_size'] ?? '0';
                 if (is_string($filledSize) || is_numeric($filledSize)) {
                     $allocation = $purchaseTrackingService->allocateForSell($savedOrder, (string) $filledSize);
@@ -261,6 +296,9 @@ class PmExecuteOrderIntentJob implements ShouldQueue
         \App\Models\Pm\PmCustodyWallet $wallet,
         PolymarketTradingService $trading
     ): bool {
+        // 只针对 SELL 的 conditional token 授权。
+        // 如果已经授权，直接返回 false；
+        // 如果未授权，就自动发授权交易并把当前 intent 延迟重试。
         $tokenId = trim((string) $intent->token_id);
         if ($tokenId === '') {
             return false;
@@ -309,6 +347,8 @@ class PmExecuteOrderIntentJob implements ShouldQueue
 
     /**
      * @param array<string,mixed> $context
+     *
+     * 记 skipped：表示这笔 intent 因规则或市场条件被跳过，不属于系统异常。
      */
     private function markSkipped(PmOrderIntent $intent, string $reason, string $category, array $context, int $orderStatus = PmOrder::STATUS_REJECTED): void
     {
@@ -344,6 +384,8 @@ class PmExecuteOrderIntentJob implements ShouldQueue
 
     /**
      * @param array<string,mixed> $context
+     *
+     * 记 failed：表示执行链路明确失败，通常需要人工关注或后续补条件后再重放。
      */
     private function markFailed(
         PmOrderIntent $intent,
@@ -383,6 +425,10 @@ class PmExecuteOrderIntentJob implements ShouldQueue
         );
     }
 
+    /**
+     * 把 precheck 阶段返回的 reason 映射成本地失败分类。
+     * 这个分类会直接展示在后台，也会影响后续排查效率。
+     */
     private function mapReasonToCategory(string $reason): string
     {
         return match (true) {
@@ -397,6 +443,10 @@ class PmExecuteOrderIntentJob implements ShouldQueue
 
     /**
      * @return array{0:string,1:bool}
+     *
+     * 根据异常文本判断：
+     * - 失败分类是什么
+     * - 这类错误是否值得自动重试
      */
     private function classifyException(string $message): array
     {
@@ -414,6 +464,8 @@ class PmExecuteOrderIntentJob implements ShouldQueue
 
     /**
      * @param array<string,mixed> $response
+     *
+     * 把 Polymarket 返回的远端订单状态，映射成系统自己的本地状态枚举。
      */
     private function mapRemoteStatus(array $response): int
     {
@@ -440,6 +492,9 @@ class PmExecuteOrderIntentJob implements ShouldQueue
 
     /**
      * @param array<string,mixed> $response
+     *
+     * 计算这笔订单本次实际成交了多少 USDC。
+     * BUY / SELL 在远端返回字段上不完全一样，所以这里分 side 做兼容处理。
      */
     private function resolveFilledUsdc(string $side, string $normalizedNotional, array $response): int
     {

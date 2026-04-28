@@ -18,6 +18,7 @@ use Dcat\Admin\Traits\HasDateTimeFormatter;
  * @property string|null $leader_role maker|taker
  * @property string|null $price 成交价(字符串)
  * @property int|null $size_usdc 成交金额USDC(1e6)
+ * @property string $leader_position_size leader 当前 token 持仓数量
  * @property array|null $raw
  * @property int $traded_at
  * @property \Illuminate\Support\Carbon|null $created_at

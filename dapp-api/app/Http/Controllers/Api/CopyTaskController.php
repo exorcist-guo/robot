@@ -37,6 +37,7 @@ class CopyTaskController extends Controller
                 'allow_partial_fill',
                 'daily_max_usdc',
                 'maker_max_quantity_per_token',
+                'size_limit',
                 'tail_order_usdc',
                 'tail_trigger_amount',
                 'tail_time_limit_seconds',
@@ -69,6 +70,7 @@ class CopyTaskController extends Controller
                 'allow_partial_fill' => (bool) $t->allow_partial_fill,
                 'daily_max_usdc' => $t->daily_max_usdc === null ? null : ($t->daily_max_usdc / 1000000),
                 'maker_max_quantity_per_token' => $t->maker_max_quantity_per_token,
+                'size_limit' => $t->size_limit,
                 'tail_order_usdc' => $t->tail_order_usdc / 1000000,
                 'tail_trigger_amount' => $t->tail_trigger_amount,
                 'tail_time_limit_seconds' => $t->tail_time_limit_seconds,
@@ -123,7 +125,7 @@ class CopyTaskController extends Controller
         }
 
         $fields = [];
-        foreach (['ratio_bps', 'min_usdc', 'max_usdc', 'maker_max_quantity_per_token'] as $k) {
+        foreach (['ratio_bps', 'min_usdc', 'max_usdc', 'maker_max_quantity_per_token', 'size_limit'] as $k) {
             if ($request->has($k)) {
                 $fields[$k] = $request->input($k);
             }
@@ -150,6 +152,16 @@ class CopyTaskController extends Controller
                 return $this->error('maker_max_quantity_per_token 不合法');
             } else {
                 $fields['maker_max_quantity_per_token'] = $value;
+            }
+        }
+        if (isset($fields['size_limit'])) {
+            $value = trim((string) $fields['size_limit']);
+            if ($value === '') {
+                $fields['size_limit'] = null;
+            } elseif (!preg_match('/^\d+(\.\d+)?$/', $value)) {
+                return $this->error('size_limit 不合法');
+            } else {
+                $fields['size_limit'] = $value;
             }
         }
 
@@ -207,6 +219,7 @@ class CopyTaskController extends Controller
         $minUsdc = max(0, (int) round(((float) $request->input('min_usdc', 0)) * 1000000));
         $maxUsdc = max(0, (int) round(((float) $request->input('max_usdc', 0)) * 1000000));
         $makerMaxQuantityPerToken = trim((string) $request->input('maker_max_quantity_per_token', ''));
+        $sizeLimit = trim((string) $request->input('size_limit', ''));
 
         if ($leaderId <= 0) {
             return $this->error('leader_id 必填');
@@ -221,6 +234,9 @@ class CopyTaskController extends Controller
         if ($makerMaxQuantityPerToken !== '' && !preg_match('/^\d+(\.\d+)?$/', $makerMaxQuantityPerToken)) {
             return $this->error('maker_max_quantity_per_token 不合法');
         }
+        if ($sizeLimit !== '' && !preg_match('/^\d+(\.\d+)?$/', $sizeLimit)) {
+            return $this->error('size_limit 不合法');
+        }
 
         $payload = array_merge($this->normalizeCommonRiskFieldsForCreate($request, false), [
             'mode' => PmCopyTask::MODE_LEADER_COPY,
@@ -229,6 +245,7 @@ class CopyTaskController extends Controller
             'min_usdc' => max(0, $minUsdc),
             'max_usdc' => max(0, $maxUsdc),
             'maker_max_quantity_per_token' => $makerMaxQuantityPerToken !== '' ? $makerMaxQuantityPerToken : null,
+            'size_limit' => $sizeLimit !== '' ? $sizeLimit : null,
         ]);
 
         $task = PmCopyTask::withTrashed()

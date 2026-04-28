@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Models\Pm\PmLeaderTrade;
 use App\Models\Pm\PmOrderIntent;
 use App\Services\Pm\CopyIntentSizingService;
+use App\Services\Pm\PolymarketDataClient;
 use App\Services\Pm\PolymarketTradingService;
 use App\Services\Pm\PurchaseTrackingService;
 use Brick\Math\BigDecimal;
@@ -26,7 +27,8 @@ class PmCreateOrderIntentsJob implements ShouldQueue
     public function handle(
         PolymarketTradingService $trading,
         CopyIntentSizingService $sizing,
-        PurchaseTrackingService $purchaseTrackingService
+        PurchaseTrackingService $purchaseTrackingService,
+        PolymarketDataClient $dataClient
     ): void
     {
         $trade = PmLeaderTrade::with('leader.copyTasks')->find($this->leaderTradeId);
@@ -37,6 +39,17 @@ class PmCreateOrderIntentsJob implements ShouldQueue
         if (!$trade->token_id || !$trading->isTokenTradable((string) $trade->token_id)) {
             return;
         }
+
+        //通过接口https://data-api.polymarket.com/positions?user=0xbddf61af533ff524d27154e589d2d7a81510c684&sortBy=CURRENT&sortDirection=DESC&sizeThreshold=.1&limit=50
+        //获取对应持仓的仓位 size ,并存入 PmLeaderTrade 数据库中,没找打对应的,默认为0
+        try {
+            $positions = $dataClient->getPositionsByUser((string) $trade->leader->proxy_wallet);
+            $positionSize = $dataClient->resolvePositionSizeByToken($positions, (string) $trade->token_id);
+        } catch (\Throwable) {
+            $positionSize = '0';
+        }
+        $trade->leader_position_size = $positionSize;
+        $trade->save();
 
         $tasks = $trade->leader->copyTasks()->where('status', 1)->get();
         foreach ($tasks as $task) {
