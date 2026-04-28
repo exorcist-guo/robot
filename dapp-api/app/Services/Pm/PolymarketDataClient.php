@@ -169,69 +169,83 @@ class PolymarketDataClient
     /**
      * @return array<int, array<string,mixed>>
      */
-    public function getTradesByUserInLastDays(string $user, int $days = 30, int $limit = 100, int $offset = 0): array
+    public function getClosedPositionsByUser(string $user, int $limit = 30, int $offset = 0): array
     {
-        $items = $this->getTradesByUser($user, $limit, $offset, false);
-        $cutoff = Carbon::now()->subDays($days)->timestamp;
+        $res = $this->client->get('closed-positions', [
+            'query' => [
+                'user' => $user,
+                'sortBy' => 'timestamp',
+                'sortDirection' => 'DESC',
+                'limit' => $limit,
+                'offset' => $offset,
+            ],
+            'headers' => [
+                'User-Agent' => 'Mozilla/5.0',
+                'Accept' => 'application/json',
+            ],
+        ]);
 
-        return array_values(array_filter($items, function (array $trade) use ($cutoff) {
-            $time = $trade['time'] ?? $trade['timestamp'] ?? null;
-            if ($time === null) {
-                return true;
-            }
-
-            if (is_numeric($time)) {
-                return (int) $time >= $cutoff;
-            }
-
-            try {
-                return Carbon::parse((string) $time)->timestamp >= $cutoff;
-            } catch (\Throwable) {
-                return true;
-            }
-        }));
+        $json = json_decode($res->getBody()->getContents(), true);
+        return is_array($json) ? array_values($json) : [];
     }
 
     /**
-     * @param array<string,mixed> $trade
+     * @param array<string,mixed> $position
      * @return array<string,mixed>
      */
-    public function normalizeLeaderboardTrade(string $address, array $trade): array
+    public function normalizeLeaderboardClosedPosition(string $address, array $position): array
     {
-        $normalized = $this->normalizeTrade($trade);
-        $investedUsdc = (int) ($normalized['size_usdc'] ?? 0);
-        $pnlAmount = $this->decimalToUsdcAtomic($trade['cashPnl'] ?? $trade['pnl'] ?? null);
-        $pnlRatioBps = $this->decimalToBps($trade['percentPnl'] ?? $trade['roi'] ?? null);
-        $isSettled = $this->detectSettled($trade, $pnlAmount);
-        $orderStatus = $this->detectOrderStatus($trade, $isSettled);
-        $pnlStatus = $pnlAmount === null
-            ? ($isSettled ? 'settled' : 'pending')
-            : ($pnlAmount > 0 ? 'profit' : ($pnlAmount < 0 ? 'loss' : 'flat'));
+        $avgPrice = (string) ($position['avgPrice'] ?? '0');
+        $closePrice = (string) ($position['curPrice'] ?? '0');
+        $size = (string) ($position['totalBought'] ?? '0');
+        $investedUsdc = $this->toUsdcAtomicSafe($avgPrice, $size);
+        $pnlAmount = $this->decimalToUsdcAtomic($position['realizedPnl'] ?? $position['cashPnl'] ?? $position['pnl'] ?? null) ?? 0;
+        $profitAmount = max(0, $pnlAmount);
+        $lossAmount = max(0, -$pnlAmount);
+        $isWin = $pnlAmount > 0 ? true : ($pnlAmount < 0 ? false : null);
+        $pnlStatus = $pnlAmount > 0 ? 'profit' : ($pnlAmount < 0 ? 'loss' : 'flat');
+        $pnlRatioBps = $investedUsdc > 0
+            ? (int) floor(($pnlAmount / $investedUsdc) * 10000)
+            : null;
+        $closedAt = $this->normalizeTradeTime($position);
+        $externalPositionId = 'cp_' . sha1(json_encode([
+            'proxyWallet' => strtolower((string) ($position['proxyWallet'] ?? $address)),
+            'asset' => (string) ($position['asset'] ?? ''),
+            'conditionId' => (string) ($position['conditionId'] ?? ''),
+            'outcome' => (string) ($position['outcome'] ?? ''),
+            'timestamp' => (string) ($position['timestamp'] ?? ''),
+            'avgPrice' => $avgPrice,
+            'totalBought' => $size,
+            'realizedPnl' => (string) ($position['realizedPnl'] ?? ''),
+        ], JSON_UNESCAPED_UNICODE));
 
         return [
             'address' => strtolower($address),
-            'external_trade_id' => (string) $normalized['trade_id'],
-            'market_id' => $normalized['market_id'],
-            'token_id' => $normalized['token_id'],
-            'title' => (string) ($trade['title'] ?? ''),
-            'slug' => (string) ($trade['slug'] ?? ''),
-            'side' => (string) $normalized['side'],
-            'outcome' => (string) ($trade['outcome'] ?? ''),
-            'price' => $normalized['price'],
-            'size' => (string) ($trade['size'] ?? $trade['amount'] ?? $trade['shares'] ?? '0'),
+            'external_position_id' => $externalPositionId,
+            'market_id' => (string) ($position['conditionId'] ?? '') ?: null,
+            'token_id' => (string) ($position['asset'] ?? '') ?: null,
+            'title' => (string) ($position['title'] ?? ''),
+            'slug' => (string) ($position['slug'] ?? ''),
+            'outcome' => (string) ($position['outcome'] ?? ''),
+            'opposite_outcome' => (string) ($position['oppositeOutcome'] ?? ''),
+            'avg_price' => $avgPrice,
+            'price' => $closePrice,
+            'size' => $size,
             'invested_amount_usdc' => $investedUsdc,
             'pnl_amount_usdc' => $pnlAmount,
+            'profit_amount_usdc' => $profitAmount,
+            'loss_amount_usdc' => $lossAmount,
+            'is_win' => $isWin,
             'pnl_status' => $pnlStatus,
             'pnl_ratio_bps' => $pnlRatioBps,
-            'order_status' => $orderStatus,
-            'is_settled' => $isSettled,
-            'traded_at' => $this->normalizeTradeTime($trade),
-            'settled_at' => $isSettled ? $this->normalizeTradeTime($trade) : null,
+            'order_status' => 'closed',
+            'is_settled' => true,
+            'traded_at' => $closedAt,
+            'settled_at' => $closedAt,
             'last_synced_at' => now(),
-            'raw' => $trade,
+            'raw' => $position,
         ];
     }
-
 
     /**
      * 统一整理 trade 字段，适配后续 leader 跟单逻辑。
@@ -296,6 +310,18 @@ class PolymarketDataClient
             ->toScale(0, RoundingMode::DOWN);
 
         return (int) $usdc->__toString();
+    }
+
+    private function toUsdcAtomicSafe(string $price, string $size): int
+    {
+        if (
+            preg_match('/^-?\d+(\.\d+)?$/', $price) !== 1
+            || preg_match('/^-?\d+(\.\d+)?$/', $size) !== 1
+        ) {
+            return 0;
+        }
+
+        return $this->toUsdcAtomic($price, $size);
     }
 
     private function decimalToUsdcAtomic(mixed $value): ?int

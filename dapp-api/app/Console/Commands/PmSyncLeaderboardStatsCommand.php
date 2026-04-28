@@ -13,7 +13,7 @@ class PmSyncLeaderboardStatsCommand extends Command
 {
     protected $signature = 'pm:sync-leaderboard-stats {--limit=30 : 每个榜单同步前 N 人}';
 
-    protected $description = '同步排行榜用户、用户近30天成交记录与每日统计';
+    protected $description = '同步排行榜用户、已平仓记录与每日统计';
 
     public function handle(PolymarketDataClient $dataClient): int
     {
@@ -26,14 +26,13 @@ class PmSyncLeaderboardStatsCommand extends Command
         $this->info('已同步排行榜用户: ' . $users->count());
 
         foreach ($users as $user) {
-            $this->syncUserTrades($dataClient, $user);
-            $this->syncUnsettledTrades($dataClient, $user);
+            $this->syncClosedPositions($dataClient, $user);
             $this->syncDailyStats($user);
         }
 
         $this->rebuildRanksFromDailyStats();
-
         $this->info('排行榜统计同步完成');
+
         return self::SUCCESS;
     }
 
@@ -121,26 +120,32 @@ class PmSyncLeaderboardStatsCommand extends Command
             ->get();
     }
 
-    private function syncUserTrades(PolymarketDataClient $dataClient, PmLeaderboardUser $user): void
+    private function syncClosedPositions(PolymarketDataClient $dataClient, PmLeaderboardUser $user): void
     {
         $offset = 0;
-        $limit = 100;
+        $limit = 30;
 
         while (true) {
             if ($offset > 3000) {
                 return;
             }
 
-            $items = $dataClient->getTradesByUserInLastDays($user->address, 30, $limit, $offset);
+            try {
+                $items = $dataClient->getClosedPositionsByUser($user->address, $limit, $offset);
+            } catch (\Throwable $e) {
+                $this->warn("拉取 {$user->address} closed positions 失败: {$e->getMessage()}");
+                return;
+            }
+
             if ($items === []) {
                 break;
             }
 
-            foreach ($items as $trade) {
-                $normalized = $dataClient->normalizeLeaderboardTrade($user->address, $trade);
+            foreach ($items as $position) {
+                $normalized = $dataClient->normalizeLeaderboardClosedPosition($user->address, $position);
                 $exists = PmLeaderboardUserTrade::query()
                     ->where('leaderboard_user_id', $user->id)
-                    ->where('external_trade_id', $normalized['external_trade_id'])
+                    ->where('external_position_id', $normalized['external_position_id'])
                     ->exists();
 
                 if ($exists) {
@@ -158,86 +163,6 @@ class PmSyncLeaderboardStatsCommand extends Command
             }
 
             $offset += $limit;
-        }
-    }
-
-    private function syncUnsettledTrades(PolymarketDataClient $dataClient, PmLeaderboardUser $user): void
-    {
-        $trades = PmLeaderboardUserTrade::query()
-            ->where('leaderboard_user_id', $user->id)
-            ->where(function ($query) {
-                $query->where('is_settled', false)
-                    ->orWhereNull('pnl_amount_usdc');
-            })
-            ->orderBy('id')
-            ->get();
-
-        if ($trades->isEmpty()) {
-            return;
-        }
-
-        $grouped = $trades->groupBy('market_id');
-        foreach ($grouped as $marketId => $items) {
-            $marketId = trim((string) $marketId);
-            if ($marketId === '') {
-                continue;
-            }
-
-            try {
-                $marketPositions = $dataClient->getMarketPositions($marketId, $user->address);
-            } catch (\Throwable) {
-                continue;
-            }
-
-            $byAsset = [];
-            $byOutcome = [];
-            foreach ($marketPositions as $bucket) {
-                if (!is_array($bucket)) {
-                    continue;
-                }
-                $positions = $bucket['positions'] ?? [];
-                if (!is_array($positions)) {
-                    continue;
-                }
-                foreach ($positions as $position) {
-                    if (!is_array($position)) {
-                        continue;
-                    }
-                    $asset = strtolower((string) ($position['asset'] ?? ''));
-                    $outcome = strtolower(trim((string) ($position['outcome'] ?? '')));
-                    if ($asset !== '') {
-                        $byAsset[$asset] = $position;
-                    }
-                    if ($outcome !== '') {
-                        $byOutcome[$outcome] = $position;
-                    }
-                }
-            }
-
-            foreach ($items as $trade) {
-                $assetKey = strtolower((string) ($trade->token_id ?? ''));
-                $outcomeKey = strtolower(trim((string) ($trade->outcome ?? '')));
-                $position = $byAsset[$assetKey] ?? $byOutcome[$outcomeKey] ?? null;
-                if (!$position) {
-                    continue;
-                }
-
-                $trade->pnl_amount_usdc = $this->toUsdcAtomicFromDecimal($position['totalPnl'] ?? $position['realizedPnl'] ?? $position['cashPnl'] ?? null);
-                $trade->pnl_ratio_bps = $this->toBpsFromPercent($position['percentPnl'] ?? $position['percentRealizedPnl'] ?? null);
-                $size = (float) ($position['size'] ?? 0);
-                $currentValue = (float) ($position['currentValue'] ?? 0);
-                $trade->is_settled = ((bool) ($position['redeemable'] ?? false)) || ($size <= 0.0 && $currentValue <= 0.0);
-                $trade->order_status = $trade->is_settled ? 'settled' : 'open';
-                $trade->pnl_status = $trade->pnl_amount_usdc === null
-                    ? ($trade->is_settled ? 'settled' : 'pending')
-                    : ($trade->pnl_amount_usdc > 0 ? 'profit' : ($trade->pnl_amount_usdc < 0 ? 'loss' : 'flat'));
-                $trade->settled_at = $trade->is_settled ? now() : null;
-                $trade->last_synced_at = now();
-                $trade->raw = array_merge(is_array($trade->raw) ? $trade->raw : [], [
-                    'market_position_snapshot' => $position,
-                ]);
-                $trade->save();
-            }
         }
     }
 
@@ -259,18 +184,13 @@ class PmSyncLeaderboardStatsCommand extends Command
         $raw = [];
         foreach ($scopes as $scope => $items) {
             $totalOrders = $items->count();
-            $closed = $items->filter(function (PmLeaderboardUserTrade $trade) {
-                return $trade->pnl_amount_usdc !== null;
-            });
-            $winOrders = $closed->filter(function (PmLeaderboardUserTrade $trade) {
-                return (int) $trade->pnl_amount_usdc > 0;
-            })->count();
-            $lossOrders = $closed->filter(function (PmLeaderboardUserTrade $trade) {
-                return (int) $trade->pnl_amount_usdc < 0;
-            })->count();
+            $winOrders = $items->filter(fn (PmLeaderboardUserTrade $trade) => $trade->is_win === true)->count();
+            $lossOrders = $items->filter(fn (PmLeaderboardUserTrade $trade) => (int) $trade->loss_amount_usdc > 0)->count();
             $investedAmount = (int) $items->sum('invested_amount_usdc');
-            $profitAmount = (int) $closed->sum('pnl_amount_usdc');
-            $closedCount = $closed->count();
+            $profitAmount = (int) $items->sum('pnl_amount_usdc');
+            $winAmount = (int) $items->sum('profit_amount_usdc');
+            $lossAmount = (int) $items->sum('loss_amount_usdc');
+            $closedCount = $totalOrders;
             $winRateBps = $closedCount > 0 ? (int) floor(($winOrders / $closedCount) * 10000) : 0;
 
             $payload[$scope . '_total_orders'] = $totalOrders;
@@ -287,6 +207,8 @@ class PmSyncLeaderboardStatsCommand extends Command
                 'win_rate_bps' => $winRateBps,
                 'invested_amount_usdc' => $investedAmount,
                 'profit_amount_usdc' => $profitAmount,
+                'win_amount_usdc' => $winAmount,
+                'loss_amount_usdc' => $lossAmount,
             ];
         }
 
@@ -330,33 +252,5 @@ class PmSyncLeaderboardStatsCommand extends Command
                 ->whereKey($stat->leaderboard_user_id)
                 ->update(['month_rank' => $index + 1]);
         }
-    }
-
-    private function toUsdcAtomicFromDecimal(mixed $value): ?int
-    {
-        if ($value === null || $value === '') {
-            return null;
-        }
-
-        $string = (string) $value;
-        if (!preg_match('/^-?\d+(\.\d+)?$/', $string)) {
-            return null;
-        }
-
-        return (int) floor((float) $string * 1000000);
-    }
-
-    private function toBpsFromPercent(mixed $value): ?int
-    {
-        if ($value === null || $value === '') {
-            return null;
-        }
-
-        $string = (string) $value;
-        if (!preg_match('/^-?\d+(\.\d+)?$/', $string)) {
-            return null;
-        }
-
-        return (int) round((float) $string * 100);
     }
 }
