@@ -27,6 +27,8 @@ Route::group([
     $router->resource('pm-custody-wallets', PmCustodyWalletController::class);
     $router->resource('pm-leaders', PmLeaderController::class);
     $router->resource('pm-leader-trades', PmLeaderTradeController::class);
+    $router->resource('pm-leaderboard-daily-stats', PmLeaderboardDailyStatController::class);
+    $router->resource('pm-leaderboard-user-trades', PmLeaderboardUserTradeController::class);
     $router->resource('pm-members', PmMemberController::class);
     $router->resource('pm-orders', PmOrderController::class);
     $router->resource('pm-order-intents', PmOrderIntentController::class);
