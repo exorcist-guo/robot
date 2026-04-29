@@ -68,19 +68,22 @@ return [
 
     // Polymarket CTF Exchange (Polygon) 相关
     'chain_id' => (int) env('PM_CHAIN_ID', 137),
-    'exchange_contract' => env('PM_EXCHANGE_CONTRACT', '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E'),
-    'neg_risk_exchange_contract' => env('PM_NEG_RISK_EXCHANGE_CONTRACT', '0xC5d563A36AE78145C45a50134d48A1215220f80a'),
+    'exchange_contract' => env('PM_EXCHANGE_CONTRACT', '0xE111180000d2663C0091e4f400237545B87B996B'),
+    'neg_risk_exchange_contract' => env('PM_NEG_RISK_EXCHANGE_CONTRACT', '0xe2222d279d744050d28e00520010520000310F59'),
     'neg_risk_adapter_contract' => strtolower((string) env('PM_NEG_RISK_ADAPTER_CONTRACT', '0xd91e80cf2e7be2e162c6513ced06f1dd0da35296')),
     'ctf_contract' => strtolower((string) env('PM_CTF_CONTRACT', '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045')),
     'polygon_rpc_url' => env('PM_POLYGON_RPC_URL', ''),
-    'collateral_token' => strtolower((string) env('PM_COLLATERAL_TOKEN', '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174')),
-    'claim_collateral_token' => strtolower((string) env('PM_CLAIM_COLLATERAL_TOKEN', '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174')),
+    'collateral_token' => strtolower((string) env('PM_COLLATERAL_TOKEN', '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB')),
+    'claim_collateral_token' => strtolower((string) env('PM_CLAIM_COLLATERAL_TOKEN', '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB')),
+    'legacy_collateral_token' => strtolower((string) env('PM_LEGACY_COLLATERAL_TOKEN', '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174')),
+    'collateral_onramp_contract' => strtolower((string) env('PM_COLLATERAL_ONRAMP_CONTRACT', '0x93070a847efEf7F70739046A929D47a521F5B8ee')),
     'maker_fee_rate_bps' => (string) env('PM_MAKER_FEE_RATE_BPS', '0'),
     'taker_fee_rate_bps' => (string) env('PM_TAKER_FEE_RATE_BPS', '1000'),
     'default_fee_rate_bps' => (string) env('PM_DEFAULT_FEE_RATE_BPS', '1000'),
+    'builder_code' => env('PM_BUILDER_CODE', '0x0000000000000000000000000000000000000000000000000000000000000000'),
     'approval_spenders' => array_values(array_filter(array_map(
         static fn (string $value) => strtolower(trim($value)),
-        explode(',', (string) env('PM_APPROVAL_SPENDERS', '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E,0xC5d563A36AE78145C45a50134d48A1215220f80a,0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296'))
+        explode(',', (string) env('PM_APPROVAL_SPENDERS', '0xE111180000d2663C0091e4f400237545B87B996B,0xe2222d279d744050d28e00520010520000310F59,0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296'))
     ))),
 
     // 登录 nonce

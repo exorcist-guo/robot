@@ -161,29 +161,51 @@ class PmClaimPositionCommand extends Command
             return 0;
         }
 
-        // 6. 循环领取所有可领取的持仓
+        // 6. 按 conditionId 聚合领取。只要某个 condition 存在可领取仓位，就把该 condition 下所有 redeemable 且链上仍有余额的 outcome 一起纳入 redeem。
+        $groupedPositions = [];
+        foreach ($claimablePositions as $position) {
+            $groupKey = strtolower((string) ($position['conditionId'] ?? ''));
+            if ($groupKey === '') {
+                $groupKey = 'position_' . count($groupedPositions);
+            }
+            if (isset($groupedPositions[$groupKey])) {
+                continue;
+            }
+
+            $positionsGroup = array_values(array_filter($positions, function (array $candidate) use ($groupKey, $wallet) {
+                return strtolower((string) ($candidate['conditionId'] ?? '')) === $groupKey
+                    && (bool) ($candidate['redeemable'] ?? false)
+                    && $this->hasChainTokenBalance($wallet, (string) ($candidate['asset'] ?? ''));
+            }));
+
+            $groupedPositions[$groupKey] = $positionsGroup !== [] ? $positionsGroup : [$position];
+        }
+
         $successCount = 0;
         $failCount = 0;
-        $totalCount = count($claimablePositions);
+        $totalCount = count($groupedPositions);
 
         $this->newLine();
-        $this->info("========== 开始领取 {$totalCount} 个持仓 ==========");
+        $this->info("========== 开始领取 {$totalCount} 个 condition ==========");
         $this->newLine();
 
-        foreach ($claimablePositions as $index => $position) {
-            $this->info("[" . ($index + 1) . "/{$totalCount}] 准备领取:");
-            $this->line("市场: " . ($position['title'] ?? 'Unknown'));
-            $label = ((float) ($position['currentValue'] ?? 0)) > 0 ? '金额' : '可返还金额';
-            $this->line($label . ': $' . number_format($position['currentValue'], 2));
-            $this->line("Condition ID: " . ($position['conditionId'] ?? 'N/A'));
+        $groupIndex = 0;
+        foreach ($groupedPositions as $positionsGroup) {
+            $groupIndex++;
+            $primaryPosition = $positionsGroup[0];
+            $totalCurrentValue = array_sum(array_map(static fn (array $pos) => (float) ($pos['currentValue'] ?? 0), $positionsGroup));
+            $this->info("[{$groupIndex}/{$totalCount}] 准备领取:");
+            $this->line("市场: " . ($primaryPosition['title'] ?? 'Unknown'));
+            $this->line('金额: $' . number_format($totalCurrentValue, 2));
+            $this->line("Condition ID: " . ($primaryPosition['conditionId'] ?? 'N/A'));
             $this->newLine();
 
             try {
-                $result = $this->claimPosition($wallet, $position, $resolver, $rpcService);
+                $result = $this->claimPosition($wallet, $positionsGroup, $resolver, $rpcService);
 
                 if ($result['success']) {
                     $successCount++;
-                    $this->info("✅ 领取成功（链上执行成功且余额校验通过）");
+                    $this->info("✅ 领取成功（链上执行成功）");
                     $this->line("交易哈希: " . $result['tx_hash']);
                     $this->line("查看交易: https://polygonscan.com/tx/" . $result['tx_hash']);
                     $this->line("Receipt Status: " . var_export($result['receipt_status'] ?? null, true));
@@ -217,7 +239,7 @@ class PmClaimPositionCommand extends Command
             }
 
             // 如果不是最后一个，等待 3 秒再继续
-            if ($index < $totalCount - 1) {
+            if ($groupIndex < $totalCount) {
                 $this->newLine();
                 $this->line("⏳ 等待 3 秒后继续下一个...");
                 sleep(3);
@@ -237,8 +259,9 @@ class PmClaimPositionCommand extends Command
         return $failCount > 0 ? 1 : 0;
     }
 
-    private function claimPosition(PmCustodyWallet $wallet, array $position, PmPrivateKeyResolver $resolver, PolygonRpcService $rpcService): array
+    private function claimPosition(PmCustodyWallet $wallet, array $positions, PmPrivateKeyResolver $resolver, PolygonRpcService $rpcService): array
     {
+        $position = $positions[0] ?? [];
         $this->info("\n========== 执行领取 ==========\n");
 
         // 1. 解析私钥
@@ -251,12 +274,12 @@ class PmClaimPositionCommand extends Command
 
         // 2. 准备参数
         $conditionId = strtolower($position['conditionId'] ?? '');
-        $collateralToken = config('pm.claim_collateral_token', config('pm.collateral_token'));
+        $collateralToken = (string) config('pm.legacy_collateral_token', config('pm.claim_collateral_token', config('pm.collateral_token')));
         $ctfContract = config('pm.ctf_contract');
         $negRiskAdapterContract = config('pm.neg_risk_adapter_contract');
         $parentCollectionId = '0x0000000000000000000000000000000000000000000000000000000000000000';
         $isNegativeRisk = (bool) ($position['negativeRisk'] ?? false);
-        $indexSets = $this->resolveIndexSetsFromPosition($position);
+        $indexSets = $this->resolveIndexSetsFromPositions($positions);
 
         $this->line("合约地址: " . ($isNegativeRisk ? $negRiskAdapterContract : $ctfContract));
         $this->line("Condition ID: {$conditionId}");
@@ -264,7 +287,7 @@ class PmClaimPositionCommand extends Command
 
         // 3. 编码 calldata
         $calldata = $isNegativeRisk
-            ? $this->encodeNegRiskRedeemCalldata($position)
+            ? $this->encodeNegRiskRedeemCalldata($positions)
             : $this->encodeCtfRedeemCalldata((string) $collateralToken, $parentCollectionId, $conditionId, $indexSets);
 
         // 4. 准备交易
@@ -272,11 +295,16 @@ class PmClaimPositionCommand extends Command
         $credential = Credential::fromKey(ltrim($privateKey, '0x'));
         $from = strtolower($credential->getAddress());
         $tokenId = (string) ($position['asset'] ?? '');
-        $beforeBalance = $this->getChainTokenBalance($wallet, $tokenId, $rpcService, true);
+        $beforeBalances = $this->getGroupTokenBalances($wallet, $positions, $rpcService, true);
+        $beforeBalance = array_sum(array_filter($beforeBalances, static fn ($value) => $value !== null));
+        $beforeCollateralBalance = $this->getCollateralBalance($wallet, $rpcService);
 
         $this->line("从地址: {$from}");
         if ($beforeBalance !== null) {
             $this->line("领取前 Token 余额: {$beforeBalance}");
+        }
+        if ($beforeCollateralBalance !== null) {
+            $this->line("领取前 Collateral 余额: {$beforeCollateralBalance}");
         }
 
         // 5. 获取 nonce 和 gas price
@@ -350,25 +378,17 @@ class PmClaimPositionCommand extends Command
                     if ($rpcService->receiptStatusSucceeded($receipt)) {
                         $this->line('✅ 链上执行成功，开始校验领取后余额');
 
-                        $afterBalance = $this->getChainTokenBalance($wallet, $tokenId, $rpcService, false);
+                        $afterBalances = $this->getGroupTokenBalances($wallet, $positions, $rpcService, false);
+                        $afterBalance = array_sum(array_filter($afterBalances, static fn ($value) => $value !== null));
+                        $afterCollateralBalance = $this->getCollateralBalance($wallet, $rpcService);
                         if ($afterBalance !== null) {
                             $this->line("领取后 Token 余额: {$afterBalance}");
                         }
-
-                        $verified = $this->verifyClaimedPositionBalance($beforeBalance, $afterBalance);
-                        if (!$verified) {
-                            return [
-                                'success' => false,
-                                'error' => '链上交易成功，但领取后余额未下降，未确认业务领取成功',
-                                'tx_hash' => $txHash,
-                                'block_number' => isset($receipt['blockNumber']) ? hexdec($receipt['blockNumber']) : 0,
-                                'gas_used' => isset($receipt['gasUsed']) ? hexdec($receipt['gasUsed']) : 0,
-                                'receipt_status' => $rawStatus,
-                                'normalized_receipt_status' => $normalizedStatus,
-                                'before_balance' => $beforeBalance,
-                                'after_balance' => $afterBalance,
-                            ];
+                        if ($afterCollateralBalance !== null) {
+                            $this->line("领取后 Collateral 余额: {$afterCollateralBalance}");
                         }
+
+                        $verified = $this->verifyClaimSuccess($beforeBalance, $afterBalance, $beforeCollateralBalance, $afterCollateralBalance);
 
                         return [
                             'success' => true,
@@ -379,6 +399,9 @@ class PmClaimPositionCommand extends Command
                             'normalized_receipt_status' => $normalizedStatus,
                             'before_balance' => $beforeBalance,
                             'after_balance' => $afterBalance,
+                            'before_collateral_balance' => $beforeCollateralBalance,
+                            'after_collateral_balance' => $afterCollateralBalance,
+                            'balance_verified' => $verified,
                         ];
                     }
 
@@ -491,23 +514,21 @@ class PmClaimPositionCommand extends Command
         return str_pad($hex, 64, '0', STR_PAD_LEFT);
     }
 
-    /**
-     * 根据持仓接口返回动态计算 indexSets
-     * 优先使用 outcomeIndex；否则回退到二元市场默认 [1,2]
-     *
-     * @return array<int,int>
-     */
-    private function resolveIndexSetsFromPosition(array $position): array
+    private function resolveIndexSetsFromPositions(array $positions): array
     {
-        $outcomeIndex = $position['outcomeIndex'] ?? null;
-        if ($outcomeIndex !== null && is_numeric($outcomeIndex)) {
-            $index = (int) $outcomeIndex;
-            if ($index >= 0 && $index <= 255) {
-                return [1 << $index];
+        $indexSets = [];
+        foreach ($positions as $position) {
+            $outcomeIndex = $position['outcomeIndex'] ?? null;
+            if ($outcomeIndex !== null && is_numeric($outcomeIndex)) {
+                $index = (int) $outcomeIndex;
+                if ($index >= 0 && $index <= 255) {
+                    $indexSets[] = 1 << $index;
+                }
             }
         }
 
-        return [1, 2];
+        $indexSets = array_values(array_unique($indexSets));
+        return $indexSets !== [] ? $indexSets : [1, 2];
     }
 
     /**
@@ -517,6 +538,49 @@ class PmClaimPositionCommand extends Command
     {
         $balance = $this->getChainTokenBalance($wallet, $tokenId, null, true);
         return $balance === null ? true : $balance > 0;
+    }
+
+    private function getGroupTokenBalances(PmCustodyWallet $wallet, array $positions, ?PolygonRpcService $rpcService = null, bool $fallbackToClaimable = false): array
+    {
+        $balances = [];
+        foreach ($positions as $position) {
+            $balances[] = $this->getChainTokenBalance($wallet, (string) ($position['asset'] ?? ''), $rpcService, $fallbackToClaimable);
+        }
+        return $balances;
+    }
+
+    private function getCollateralBalance(PmCustodyWallet $wallet, ?PolygonRpcService $rpcService = null): ?int
+    {
+        $collateralToken = trim((string) config('pm.claim_collateral_token', config('pm.collateral_token')));
+        if ($collateralToken === '') {
+            return null;
+        }
+
+        try {
+            $rpcService ??= app(PolygonRpcService::class);
+            $method = '0x70a08231'; // balanceOf(address)
+            $addressHex = str_pad(substr(strtolower($wallet->signer_address), 2), 64, '0', STR_PAD_LEFT);
+            $result = $rpcService->call('eth_call', [[
+                'to' => strtolower($collateralToken),
+                'data' => $method . $addressHex,
+            ], 'latest']);
+
+            if (!is_string($result)) {
+                return null;
+            }
+
+            return $rpcService->rpcQuantityToInt($result);
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    private function verifyClaimSuccess(?int $beforeTokenBalance, ?int $afterTokenBalance, ?int $beforeCollateralBalance, ?int $afterCollateralBalance): bool
+    {
+        $tokenReduced = $beforeTokenBalance !== null && $afterTokenBalance !== null && $afterTokenBalance < $beforeTokenBalance;
+        $collateralIncreased = $beforeCollateralBalance !== null && $afterCollateralBalance !== null && $afterCollateralBalance > $beforeCollateralBalance;
+
+        return $tokenReduced || $collateralIncreased;
     }
 
     private function getChainTokenBalance(PmCustodyWallet $wallet, string $tokenId, ?PolygonRpcService $rpcService = null, bool $fallbackToClaimable = false): ?int
@@ -723,7 +787,7 @@ class PmClaimPositionCommand extends Command
 
                         if ($result['success']) {
                             $totalClaimed++;
-                            $this->info("✅ 成功（链上执行成功且余额校验通过）- TX: " . $result['tx_hash']);
+                            $this->info("✅ 成功（链上执行成功）- TX: " . $result['tx_hash']);
                         } else {
                             $totalFailed++;
                             $this->error("❌ 失败: " . ($result['error'] ?? 'Unknown'));

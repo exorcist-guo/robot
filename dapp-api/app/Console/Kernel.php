@@ -16,6 +16,7 @@ use App\Console\Commands\PmSyncLeaderboardStatsCommand;
 use App\Console\Commands\PmTailSweepPriceDaemonCommand;
 use App\Console\Commands\PmPreplaceNextRoundOrderCommand;
 use App\Console\Commands\PmSkipRoundSettleCommand;
+use App\Console\Commands\PmWrapCollateralCommand;
 use App\Console\Commands\PmValidateSetupCommand;
 use App\Console\Commands\TestCommand;
 use Illuminate\Console\Scheduling\Schedule;
@@ -39,6 +40,7 @@ class Kernel extends ConsoleKernel
         PmTailSweepPriceDaemonCommand::class,
         PmPreplaceNextRoundOrderCommand::class,
         PmSkipRoundSettleCommand::class,
+        PmWrapCollateralCommand::class,
         PmValidateSetupCommand::class,
     ];
     /**

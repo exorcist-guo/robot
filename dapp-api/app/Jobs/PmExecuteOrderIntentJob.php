@@ -206,7 +206,7 @@ class PmExecuteOrderIntentJob implements ShouldQueue
                     'last_sync_at' => now(),
                     'filled_usdc' => $filledUsdc,
                     'avg_price' => $normalizedPrice,
-                    'exchange_nonce' => (string) ($result['request']['payload']['order']['nonce'] ?? '0'),
+                    'exchange_nonce' => (string) ($result['request']['payload']['order']['timestamp'] ?? '0'),
                     'settlement_payload' => $settlementPayload,
                     'failure_category' => null,
                     'is_retryable' => false,

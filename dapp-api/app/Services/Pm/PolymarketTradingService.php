@@ -14,6 +14,7 @@ use PolymarketPhp\Polymarket\Auth\ApiCredentials;
 use PolymarketPhp\Polymarket\Auth\ClobAuthenticator;
 use PolymarketPhp\Polymarket\Auth\Signer\Eip712Signer as ClobAuthEip712Signer;
 use PolymarketPhp\Polymarket\Enums\SignatureType;
+use App\Services\Pm\PolygonRpcService;
 
 class PolymarketTradingService
 {
@@ -27,6 +28,7 @@ class PolymarketTradingService
         private readonly PmPrivateKeyResolver $privateKeyResolver,
         private readonly PolymarketOrderSigner $orderSigner,
         private readonly PolymarketClientFactory $factory,
+        private readonly PolygonRpcService $polygonRpc,
     ) {}
 
     public function ensureApiCredentials(PmCustodyWallet $wallet): PmPolymarketApiCredential
@@ -412,6 +414,7 @@ class PolymarketTradingService
         }
 
         if ($side === self::SIDE_BUY) {
+            $this->ensureWrappedCollateral($wallet);
             $credRecord = $wallet->apiCredentials ?: $this->ensureApiCredentials($wallet);
             $creds = $this->decodeApiCredentials($credRecord);
             $privateKey = $this->privateKeyResolver->resolve($wallet);
@@ -710,7 +713,7 @@ class PolymarketTradingService
     }
 
     /**
-     * @param array{token_id:string,side:string,price:string,size:string,order_type?:string,defer_exec?:bool,expiration?:string|int|null,nonce?:string|int|null,fee_rate_bps?:string|int|null,salt?:string|int|null,outcome?:string|null,market_id?:string|null} $params
+     * @param array{token_id:string,side:string,price:string,size:string,order_type?:string,defer_exec?:bool,expiration?:string|int|null,salt?:string|int|null,timestamp?:string|int|null,metadata?:string|null,builder?:string|null,outcome?:string|null,market_id?:string|null} $params
      * @return array{request: array<string,mixed>, response: array<string,mixed>}
      */
     public function placeOrder(PmCustodyWallet $wallet, array $params): array
@@ -728,36 +731,18 @@ class PolymarketTradingService
         $orderType = strtoupper((string) ($params['order_type'] ?? 'GTC'));
         $deferExec = (bool) ($params['defer_exec'] ?? false);
         $expiration = (string) ($params['expiration'] ?? '0');
-        $nonce = (string) ($params['nonce'] ?? ($wallet->exchange_nonce ?: '0'));
+        $timestamp = $this->normalizeOrderTimestamp($params['timestamp'] ?? null);
 
-        $feeResp = $client->clob()->server()->getFeeRate($tokenId);
         $book = $this->factory->makeReadClient()->clob()->book()->get($tokenId);
         $isNegRisk = (bool) ($book['neg_risk'] ?? false);
-        $defaultFeeRateBps = (string) config('pm.default_fee_rate_bps', '1000');
-        $makerFeeRateBps = (string) config('pm.maker_fee_rate_bps', '1000');
-        $takerFeeRateBps = (string) config('pm.taker_fee_rate_bps', '1000');
-        $feeRateBps = (string) ($params['fee_rate_bps']
-            ?? $feeResp['feeRateBps']
-            ?? $feeResp['fee_rate_bps']
-            ?? $feeResp['base_fee']
-            ?? null);
-        if (!preg_match('/^\d+$/', $feeRateBps) || $feeRateBps === '0') {
-            $isMarketable = $this->isMarketableOrder($side, $price, is_array($book) ? $book : []);
-            $fallbackFeeRateBps = strtoupper($side) === self::SIDE_BUY
-                ? $takerFeeRateBps
-                : ($isMarketable ? $takerFeeRateBps : $makerFeeRateBps);
-            $feeRateBps = preg_match('/^\d+$/', $fallbackFeeRateBps) === 1 && $fallbackFeeRateBps !== '0'
-                ? $fallbackFeeRateBps
-                : (string) ($feeResp['base_fee'] ?? $defaultFeeRateBps);
-        }
-        if (!preg_match('/^\d+$/', $feeRateBps)) {
-            $feeRateBps = $defaultFeeRateBps;
-        }
 
         $salt = (string) ($params['salt'] ?? $this->makeSalt());
         $signatureType = (int) ($wallet->signature_type ?? SignatureType::EOA->value);
         $funder = strtolower($wallet->funder_address ?: $wallet->signer_address);
         $signer = strtolower($wallet->signer_address);
+        $metadata = $this->normalizeOrderMetadata($params['metadata'] ?? null);
+        $metadataForSignature = $metadata;
+        $builder = $this->normalizeBytes32($params['builder'] ?? config('pm.builder_code'));
 
         $amounts = $this->orderSigner->makeAmounts($side, $price, $size);
         $orderSide = $this->orderSigner->sideToInt($side);
@@ -770,15 +755,14 @@ class PolymarketTradingService
             'salt' => $salt,
             'maker' => $funder,
             'signer' => $signer,
-            'taker' => '0x0000000000000000000000000000000000000000',
             'tokenId' => $tokenId,
             'makerAmount' => $amounts['makerAmount'],
             'takerAmount' => $amounts['takerAmount'],
-            'expiration' => $expiration,
-            'nonce' => $nonce,
-            'feeRateBps' => $feeRateBps,
             'side' => $orderSide,
             'signatureType' => $signatureType,
+            'timestamp' => $timestamp,
+            'metadata' => $metadataForSignature,
+            'builder' => $builder,
             'verifyingContract' => $verifyingContract,
         ];
 
@@ -788,15 +772,15 @@ class PolymarketTradingService
             'salt' => (int) $salt,
             'maker' => $funder,
             'signer' => $signer,
-            'taker' => '0x0000000000000000000000000000000000000000',
             'tokenId' => (string) $tokenId,
             'makerAmount' => (string) $amounts['makerAmount'],
             'takerAmount' => (string) $amounts['takerAmount'],
-            'expiration' => (string) $expiration,
-            'nonce' => (string) $nonce,
-            'feeRateBps' => (string) $feeRateBps,
             'side' => $side,
             'signatureType' => $signatureType,
+            'timestamp' => (string) $timestamp,
+            'metadata' => $metadata,
+            'builder' => $builder,
+            'expiration' => (string) $expiration,
             'signature' => $order['signature'],
         ];
 
@@ -804,8 +788,27 @@ class PolymarketTradingService
             'order' => $requestOrder,
             'owner' => $creds->apiKey,
             'orderType' => $orderType,
-            'postOnly' => $deferExec,
+            'deferExec' => $deferExec,
         ];
+
+        if ((bool) ($params['debug_payload'] ?? false)) {
+            return [
+                'request' => [
+                    'endpoint' => '/order',
+                    'payload' => $payload,
+                    'input' => [
+                        'token_id' => $tokenId,
+                        'market_id' => (string) ($params['market_id'] ?? ''),
+                        'outcome' => (string) ($params['outcome'] ?? ''),
+                        'side' => $side,
+                        'price' => $price,
+                        'size' => $size,
+                        'timestamp' => $timestamp,
+                    ],
+                ],
+                'response' => ['debug_only' => true],
+            ];
+        }
 
         $response = $client->clob()->orders()->post($payload);
 
@@ -820,7 +823,7 @@ class PolymarketTradingService
                     'side' => $side,
                     'price' => $price,
                     'size' => $size,
-                    'nonce' => $nonce,
+                    'timestamp' => $timestamp,
                 ],
             ],
             'response' => $response,
@@ -949,14 +952,213 @@ class PolymarketTradingService
         return is_array($book) && $book !== [];
     }
 
+    private function normalizeOrderMetadata(mixed $value = null): string
+    {
+        if ($value === null) {
+            return '0x0000000000000000000000000000000000000000000000000000000000000000';
+        }
+
+        $string = (string) $value;
+        if ($string === '') {
+            return '0x0000000000000000000000000000000000000000000000000000000000000000';
+        }
+
+        return $this->normalizeBytes32($string);
+    }
+
+    private function normalizeOrderTimestamp(mixed $value = null): string
+    {
+        if ($value !== null) {
+            $string = trim((string) $value);
+            if ($string !== '' && preg_match('/^\d+$/', $string) === 1) {
+                return strlen($string) >= 13 ? $string : bcmul($string, '1000', 0);
+            }
+        }
+
+        return (string) ((int) floor(microtime(true) * 1000));
+    }
+
+    private function normalizeBytes32(mixed $value = null): string
+    {
+        $hex = strtolower(trim((string) ($value ?? '')));
+        if ($hex === '') {
+            return '0x0000000000000000000000000000000000000000000000000000000000000000';
+        }
+
+        $hex = str_starts_with($hex, '0x') ? substr($hex, 2) : $hex;
+        if ($hex === '') {
+            return '0x0000000000000000000000000000000000000000000000000000000000000000';
+        }
+
+        if (!ctype_xdigit($hex) || strlen($hex) > 64) {
+            throw new \InvalidArgumentException('bytes32 字段必须是 32 字节十六进制字符串');
+        }
+
+        return '0x' . str_pad($hex, 64, '0', STR_PAD_LEFT);
+    }
+
     private function makeSalt(): string
     {
-        return (string) random_int(1, PHP_INT_MAX);
+        return (string) random_int(1, 9007199254740991);
+    }
+
+    public function wrapCollateralToPusd(PmCustodyWallet $wallet): array
+    {
+        $legacyToken = trim((string) config('pm.legacy_collateral_token'));
+        $collateralToken = trim((string) config('pm.collateral_token'));
+        $onramp = trim((string) config('pm.collateral_onramp_contract'));
+        $owner = strtolower((string) $wallet->tradingAddress());
+
+        if ($legacyToken === '' || $collateralToken === '' || $onramp === '' || $owner === '') {
+            throw new \RuntimeException('pUSD wrap 配置不完整');
+        }
+
+        $beforePusd = $this->readErc20Balance($collateralToken, $owner);
+        $beforeLegacy = $this->readErc20Balance($legacyToken, $owner);
+        if (bccomp($beforeLegacy, '0', 0) <= 0) {
+            return [
+                'wrapped' => false,
+                'reason' => 'no_legacy_collateral_balance',
+                'legacy_balance' => $beforeLegacy,
+                'pusd_balance' => $beforePusd,
+                'legacy_token' => $legacyToken,
+                'collateral_token' => $collateralToken,
+                'onramp' => $onramp,
+            ];
+        }
+
+        $privateKey = $this->privateKeyResolver->resolve($wallet);
+        $credential = Credential::fromKey(ltrim($privateKey, '0x'));
+        $from = strtolower($credential->getAddress());
+        $rpcUrl = trim((string) config('pm.polygon_rpc_url'));
+        $chainId = (int) config('pm.chain_id', 137);
+        $gasPriceHex = (string) $this->rpc($rpcUrl, 'eth_gasPrice', []);
+        $nonce = $this->rpcQuantityToInt($this->rpc($rpcUrl, 'eth_getTransactionCount', [$from, 'pending']));
+        $txHashes = [];
+
+        $allowanceData = '0xdd62ed3e'
+            . $this->padHex($from)
+            . $this->padHex($onramp);
+        $allowanceHex = $this->rpc($rpcUrl, 'eth_call', [[
+            'to' => $legacyToken,
+            'data' => $allowanceData,
+        ], 'latest']);
+        $allowance = $this->rpcHexToDecimalString($allowanceHex);
+
+        if (bccomp($allowance, $beforeLegacy, 0) < 0) {
+            $approveData = '0x095ea7b3'
+                . $this->padHex(substr(strtolower($onramp), 2))
+                . $this->padHex($this->decToHex($beforeLegacy));
+            $approveRaw = [
+                'nonce' => $this->toRpcHex($nonce),
+                'gasPrice' => $gasPriceHex,
+                'gasLimit' => $this->toRpcHex(90000),
+                'to' => $legacyToken,
+                'value' => $this->toRpcHex(0),
+                'data' => $approveData,
+                'chainId' => $chainId,
+            ];
+            $approveSigned = $credential->signTransaction($approveRaw);
+            $approveTx = (string) $this->rpc($rpcUrl, 'eth_sendRawTransaction', [$approveSigned]);
+            $this->waitForReceipt($approveTx);
+            $txHashes[] = ['type' => 'approve', 'tx_hash' => $approveTx];
+            $nonce++;
+        }
+
+        $wrapData = '0x62355638'
+            . $this->padHex(substr(strtolower($legacyToken), 2))
+            . $this->padHex(substr(strtolower($from), 2))
+            . $this->padHex($this->decToHex($beforeLegacy));
+        $wrapRaw = [
+            'nonce' => $this->toRpcHex($nonce),
+            'gasPrice' => $gasPriceHex,
+            'gasLimit' => $this->toRpcHex(180000),
+            'to' => $onramp,
+            'value' => $this->toRpcHex(0),
+            'data' => $wrapData,
+            'chainId' => $chainId,
+        ];
+        $wrapSigned = $credential->signTransaction($wrapRaw);
+        $wrapTx = (string) $this->rpc($rpcUrl, 'eth_sendRawTransaction', [$wrapSigned]);
+        $this->waitForReceipt($wrapTx);
+        $txHashes[] = ['type' => 'wrap', 'tx_hash' => $wrapTx];
+
+        $afterPusd = $this->readErc20Balance($collateralToken, $owner);
+        $afterLegacy = $this->readErc20Balance($legacyToken, $owner);
+
+        return [
+            'wrapped' => true,
+            'legacy_balance_before' => $beforeLegacy,
+            'legacy_balance_after' => $afterLegacy,
+            'pusd_balance_before' => $beforePusd,
+            'pusd_balance_after' => $afterPusd,
+            'legacy_token' => $legacyToken,
+            'collateral_token' => $collateralToken,
+            'onramp' => $onramp,
+            'tx_hashes' => $txHashes,
+        ];
     }
 
     /**
      * @return array<int,string>
      */
+    private function ensureWrappedCollateral(PmCustodyWallet $wallet): void
+    {
+        $result = $this->wrapCollateralToPusd($wallet);
+        if (($result['wrapped'] ?? false) !== true && ($result['reason'] ?? '') !== 'no_legacy_collateral_balance') {
+            throw new \RuntimeException('自动 wrap pUSD 失败');
+        }
+    }
+
+    private function readErc20Balance(string $token, string $owner): string
+    {
+        $rpcUrl = trim((string) config('pm.polygon_rpc_url'));
+        if ($rpcUrl === '' || $token === '' || $owner === '') {
+            return '0';
+        }
+
+        $data = '0x70a08231' . $this->padHex($owner);
+        $result = $this->rpc($rpcUrl, 'eth_call', [[
+            'to' => strtolower($token),
+            'data' => $data,
+        ], 'latest']);
+
+        return $this->rpcHexToDecimalString($result);
+    }
+
+    private function waitForReceipt(string $txHash, int $maxAttempts = 20): void
+    {
+        $rpcUrl = trim((string) config('pm.polygon_rpc_url'));
+        for ($i = 0; $i < $maxAttempts; $i++) {
+            $receipt = $this->rpc($rpcUrl, 'eth_getTransactionReceipt', [$txHash]);
+            if (is_array($receipt) && !empty($receipt['status'])) {
+                if ($this->rpcQuantityToInt((string) $receipt['status']) !== 1) {
+                    throw new \RuntimeException('链上交易执行失败: ' . $txHash);
+                }
+                return;
+            }
+            usleep(1000000);
+        }
+
+        throw new \RuntimeException('等待链上交易确认超时: ' . $txHash);
+    }
+
+    private function decToHex(string $decimal): string
+    {
+        if ($decimal === '0') {
+            return '0';
+        }
+
+        $hex = '';
+        while (bccomp($decimal, '0', 0) > 0) {
+            $mod = (int) bcmod($decimal, '16');
+            $hex = dechex($mod) . $hex;
+            $decimal = bcdiv($decimal, '16', 0);
+        }
+
+        return $hex;
+    }
+
     private function approvalSpenders(): array
     {
         $spenders = config('pm.approval_spenders', []);

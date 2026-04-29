@@ -2,17 +2,18 @@
 
 namespace App\Console\Commands;
 
-use App\Jobs\PmExecuteOrderIntentJob;
 use App\Models\Pm\PmCopyTask;
+use App\Models\Pm\PmOrder;
 use App\Models\Pm\PmOrderIntent;
 use App\Services\Pm\GammaClient;
 use App\Services\Pm\MarketInfoCache;
 use App\Services\Pm\PolymarketTradingService;
 use App\Services\Pm\TailSweepPriceCache;
+use Brick\Math\BigDecimal;
+use Brick\Math\RoundingMode;
 use GuzzleHttp\Client;
 use Illuminate\Console\Command;
 use Illuminate\Contracts\Cache\LockProvider;
-use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 
@@ -66,7 +67,7 @@ class PlaceOrderDirectly extends Command
         // 只加载启用中的扫尾盘任务，并裁剪为本轮计算真正需要的字段。
         $tasks = PmCopyTask::query()
             ->where('mode', PmCopyTask::MODE_TAIL_SWEEP)
-            ->where('status', 1)
+            // ->where('status', 1)
             ->where('id',6)
             ->get([
                 'id',
@@ -249,83 +250,227 @@ class PlaceOrderDirectly extends Command
                 continue;
             }
 
-            // 优先使用 market websocket 缓存里的 best_ask 作为买入参考价；取不到再回退到订单簿最优价。
+            // 优先按触发方向下单；若该 token 当前没有可买卖盘，则回退到同一 market 的另一侧 token 做 V2 下单测试。
             [$entryPrice, $entryPriceSource] = $this->resolveEntryPrice($trading, $tokenId, $side, (string) $task->tail_order_usdc, $books);
             if (!preg_match('/^\d+(\.\d+)?$/', $entryPrice) || bccomp($entryPrice, '0', 8) <= 0) {
-                var_dump($entryPrice,$entryPriceSource,44444);
-                continue;
+                $fallbackTokenId = $tokenId === (string) $task->token_yes_id
+                    ? (string) $task->token_no_id
+                    : (string) $task->token_yes_id;
+                [$fallbackPrice, $fallbackPriceSource] = $this->resolveEntryPrice($trading, $fallbackTokenId, $side, (string) $task->tail_order_usdc, $books);
+                if (!preg_match('/^\d+(\.\d+)?$/', $fallbackPrice) || bccomp($fallbackPrice, '0', 8) <= 0) {
+                    var_dump($entryPrice, $entryPriceSource, 44444);
+                    continue;
+                }
+
+                $tokenId = $fallbackTokenId;
+                $entryPrice = $fallbackPrice;
+                $entryPriceSource = $fallbackPriceSource . ':fallback';
+                $triggerSide = $tokenId === (string) $task->token_yes_id ? 'up' : 'down';
             }
 
-            // 同一任务同一轮若已有 pending 意图，则不再重复创建。
-            $existingIntent = PmOrderIntent::query()
-                ->where('copy_task_id', $task->id)
-                ->where('status', PmOrderIntent::STATUS_PENDING)
-                ->where('risk_snapshot->round_key', $roundKey)
+            $wallet = \App\Models\Pm\PmCustodyWallet::with('apiCredentials')
+                ->where('member_id', $task->member_id)
                 ->first();
-            if ($existingIntent) {
-                var_dump(5555);
+            if (!$wallet) {
+                $this->warn("任务 {$task->id} 未找到托管钱包");
                 continue;
             }
 
-            // 创建待执行下单意图，并把本轮触发上下文完整写入 risk_snapshot。
-            $intent = PmOrderIntent::create([
-                'copy_task_id' => $task->id,
-                'leader_trade_id' => null,
-                'member_id' => $task->member_id,
-                'token_id' => $tokenId,
-                'side' => $side,
-                'leader_price' => $entryPrice,
-                'target_usdc' => (int) $task->tail_order_usdc,
-                'clamped_usdc' => (int) $task->tail_order_usdc,
-                'status' => PmOrderIntent::STATUS_PENDING,
-                'skip_reason' => null,
-                'risk_snapshot' => [
-                    'mode' => PmCopyTask::MODE_TAIL_SWEEP,
-                    'max_slippage_bps' => $task->max_slippage_bps,
-                    'allow_partial_fill' => (bool) $task->allow_partial_fill,
-                    'daily_max_usdc' => $task->daily_max_usdc,
-                    'round_key' => $roundKey,
-                    'market_slug' => $task->market_slug,
-                    'market_id' => $task->market_id,
-                    'market_question' => $task->market_question,
-                    'resolution_source' => $task->resolution_source,
-                    'trigger_side' => $triggerSide,
-                    'trigger_amount' => $threshold,
-                    'current_price' => $currentPrice,
-                    'round_start_price' => $startPrice,
-                    'price_to_beat' => (string) ($task->price_to_beat ?: '0'),
-                    'change' => $change,
-                    'remaining_seconds' => $remainingSeconds,
-                    'token_yes_id' => $task->token_yes_id,
-                    'token_no_id' => $task->token_no_id,
-                    'entry_price' => $entryPrice,
-                    'entry_price_source' => $entryPriceSource,
-                ],
-            ]);
+            $amountUsdc = bcdiv((string) $task->tail_order_usdc, '1000000', 6);
+            $size = bcdiv($amountUsdc, $entryPrice, 2);
+            if (!preg_match('/^\d+(\.\d+)?$/', $size) || bccomp($size, '0', 8) <= 0) {
+                $this->warn("任务 {$task->id} 计算下单 size 失败: {$size}");
+                continue;
+            }
 
-            // 标记当前轮次已触发，防止本轮再次生成意图。
-            $task->tail_last_triggered_round_key = $roundKey;
-            $task->save();
+            try {
+                $intent = PmOrderIntent::create([
+                    'copy_task_id' => $task->id,
+                    'leader_trade_id' => null,
+                    'member_id' => $task->member_id,
+                    'token_id' => $tokenId,
+                    'side' => $side,
+                    'leader_price' => $entryPrice,
+                    'target_usdc' => (int) $task->tail_order_usdc,
+                    'clamped_usdc' => (int) $task->tail_order_usdc,
+                    'status' => PmOrderIntent::STATUS_PENDING,
+                    'skip_reason' => null,
+                    'risk_snapshot' => [
+                        'mode' => PmCopyTask::MODE_TAIL_SWEEP,
+                        'market_slug' => $task->market_slug,
+                        'market_id' => $task->market_id,
+                        'market_question' => $task->market_question,
+                        'resolution_source' => $task->resolution_source,
+                        'trigger_side' => $triggerSide,
+                        'trigger_amount' => $threshold,
+                        'current_price' => $currentPrice,
+                        'round_start_price' => $startPrice,
+                        'price_to_beat' => (string) ($task->price_to_beat ?: '0'),
+                        'change' => $change,
+                        'remaining_seconds' => $remainingSeconds,
+                        'token_yes_id' => $task->token_yes_id,
+                        'token_no_id' => $task->token_no_id,
+                        'entry_price' => $entryPrice,
+                        'entry_price_source' => $entryPriceSource,
+                    ],
+                    'execution_mode' => 'live',
+                    'execution_stage' => 'submitting',
+                ]);
 
-            // 交给统一下单执行任务异步处理。
-            PmExecuteOrderIntentJob::dispatchSync($intent->id);
-            $intent->refresh();
-            $order = $intent->order()->latest('id')->first();
-            var_dump([
-                'task_id' => $task->id,
-                'intent_id' => $intent->id,
-                'intent_status' => (int) $intent->status,
-                'intent_skip_reason' => (string) ($intent->skip_reason ?? ''),
-                'intent_last_error_code' => (string) ($intent->last_error_code ?? ''),
-                'intent_last_error_message' => (string) ($intent->last_error_message ?? ''),
-                'order_id' => $order?->id,
-                'order_status' => $order ? (int) $order->status : null,
-                'order_error_code' => $order ? (string) ($order->error_code ?? '') : '',
-                'order_error_message' => $order ? (string) ($order->error_message ?? '') : '',
-                'poly_order_id' => $order ? (string) ($order->poly_order_id ?? '') : '',
-            ]);
-            $this->info("任务 {$task->id} 已触发扫尾盘下单");
+                $result = $trading->placeOrder($wallet, [
+                    'token_id' => $tokenId,
+                    'market_id' => (string) $task->market_id,
+                    'outcome' => $triggerSide,
+                    'side' => $side,
+                    'price' => $entryPrice,
+                    'size' => $size,
+                    'order_type' => 'GTC',
+                    'defer_exec' => false,
+                    'expiration' => '0',
+                ]);
+
+                $normalizedNotional = BigDecimal::of($entryPrice)
+                    ->multipliedBy($size)
+                    ->toScale(6, RoundingMode::DOWN)
+                    ->__toString();
+                $remoteStatus = $this->mapRemoteStatus((array) ($result['response'] ?? []));
+                $filledUsdc = $this->resolveFilledUsdc($side, $normalizedNotional, (array) ($result['response'] ?? []));
+                $conditionId = $result['response']['market'] ?? null;
+                $settlementPayload = $conditionId ? ['condition_id' => $conditionId] : null;
+
+                $order = PmOrder::updateOrCreate(
+                    ['order_intent_id' => $intent->id],
+                    [
+                        'token_id' => $tokenId,
+                        'poly_order_id' => $result['response']['id'] ?? $result['response']['orderID'] ?? null,
+                        'status' => $remoteStatus,
+                        'request_payload' => array_merge($intent->risk_snapshot ?? [], ['request' => $result['request'] ?? []]),
+                        'response_payload' => $result['response'] ?? [],
+                        'submitted_at' => now(),
+                        'last_sync_at' => now(),
+                        'filled_usdc' => $filledUsdc,
+                        'avg_price' => $entryPrice,
+                        'exchange_nonce' => (string) ($result['request']['payload']['order']['timestamp'] ?? '0'),
+                        'settlement_payload' => $settlementPayload,
+                        'failure_category' => null,
+                        'is_retryable' => false,
+                        'retry_count' => 0,
+                        'error_code' => null,
+                        'error_message' => null,
+                    ]
+                );
+
+                $intent->status = PmOrderIntent::STATUS_SUBMITTED;
+                $intent->skip_reason = null;
+                $intent->skip_category = null;
+                $intent->last_error_code = null;
+                $intent->last_error_message = null;
+                $intent->processed_at = now();
+                $intent->execution_stage = 'submitted';
+                $intent->decision_payload = array_merge(
+                    is_array($intent->decision_payload) ? $intent->decision_payload : [],
+                    ['submit_result' => ['remote_status' => $remoteStatus, 'poly_order_id' => $order->poly_order_id]]
+                );
+                $intent->save();
+
+                var_dump([
+                    'task_id' => $task->id,
+                    'member_id' => $task->member_id,
+                    'intent_id' => $intent->id,
+                    'order_id' => $order->id,
+                    'poly_order_id' => $order->poly_order_id,
+                    'token_id' => $tokenId,
+                    'price' => $entryPrice,
+                    'size' => $size,
+                    'request' => $result['request'] ?? [],
+                    'response' => $result['response'] ?? [],
+                ]);
+                $this->info("任务 {$task->id} 已直接发起正式下单并落库");
+            } catch (\Throwable $e) {
+                if (isset($intent) && $intent instanceof PmOrderIntent) {
+                    $intent->status = PmOrderIntent::STATUS_FAILED;
+                    $intent->last_error_code = (string) ($e->getCode() ?: 'submit_failed');
+                    $intent->last_error_message = $e->getMessage();
+                    $intent->processed_at = now();
+                    $intent->execution_stage = 'failed';
+                    $intent->save();
+
+                    PmOrder::updateOrCreate(
+                        ['order_intent_id' => $intent->id],
+                        [
+                            'token_id' => $tokenId,
+                            'status' => PmOrder::STATUS_ERROR,
+                            'request_payload' => array_merge($intent->risk_snapshot ?? [], [
+                                'price' => $entryPrice,
+                                'size' => $size,
+                                'token_id' => $tokenId,
+                                'side' => $side,
+                            ]),
+                            'response_payload' => null,
+                            'error_code' => (string) ($e->getCode() ?: 'submit_failed'),
+                            'error_message' => $e->getMessage(),
+                            'failure_category' => 'remote',
+                            'is_retryable' => false,
+                            'retry_count' => 0,
+                        ]
+                    );
+                }
+
+                var_dump([
+                    'task_id' => $task->id,
+                    'member_id' => $task->member_id,
+                    'token_id' => $tokenId,
+                    'price' => $entryPrice,
+                    'size' => $size,
+                    'error' => $e->getMessage(),
+                ]);
+                $this->error("任务 {$task->id} 正式下单失败: {$e->getMessage()}");
+            }
         }
+    }
+
+    private function mapRemoteStatus(array $response): int
+    {
+        $status = strtolower((string) ($response['status'] ?? ''));
+        $matchedSize = null;
+        foreach (['size_matched', 'filled_size', 'matched_size', 'sizeMatched'] as $key) {
+            $value = $response[$key] ?? null;
+            if (is_string($value) || is_int($value) || is_float($value)) {
+                $matchedSize = (string) $value;
+                break;
+            }
+        }
+        $hasMatchedSize = $matchedSize !== null && preg_match('/^\d+(\.\d+)?$/', $matchedSize) && bccomp($matchedSize, '0', 8) > 0;
+
+        return match (true) {
+            in_array($status, ['matched', 'filled'], true) => PmOrder::STATUS_FILLED,
+            in_array($status, ['partially_matched', 'partial', 'partially_filled'], true) => PmOrder::STATUS_PARTIAL,
+            in_array($status, ['canceled', 'cancelled', 'canceled_market_resolved', 'cancelled_market_resolved'], true) && $hasMatchedSize => PmOrder::STATUS_FILLED,
+            in_array($status, ['canceled', 'cancelled'], true) => PmOrder::STATUS_CANCELED,
+            $status === 'rejected' => PmOrder::STATUS_REJECTED,
+            default => PmOrder::STATUS_SUBMITTED,
+        };
+    }
+
+    private function resolveFilledUsdc(string $side, string $normalizedNotional, array $response): int
+    {
+        $status = $this->mapRemoteStatus($response);
+        if (!in_array($status, [PmOrder::STATUS_FILLED, PmOrder::STATUS_PARTIAL], true)) {
+            return 0;
+        }
+
+        $candidate = $side === PolymarketTradingService::SIDE_BUY
+            ? (string) ($response['makingAmount'] ?? $normalizedNotional)
+            : (string) ($response['takingAmount'] ?? $normalizedNotional);
+
+        if (!preg_match('/^\d+(\.\d+)?$/', $candidate)) {
+            $candidate = $normalizedNotional;
+        }
+
+        return (int) BigDecimal::of($candidate)
+            ->multipliedBy('1000000')
+            ->toScale(0, RoundingMode::DOWN)
+            ->__toString();
     }
 
     private function buildCurrentRoundSlug(string $baseSlug, Carbon $now): string

@@ -13,7 +13,7 @@ use Brick\Math\RoundingMode;
 use Illuminate\Console\Command;
 use Illuminate\Support\Carbon;
 
-class PlaceOrderDirectly extends Command
+class PmSpecifyOrderCommand extends Command
 {
     protected $signature = 'pm:specify-order
         {user : member_id 或钱包地址}

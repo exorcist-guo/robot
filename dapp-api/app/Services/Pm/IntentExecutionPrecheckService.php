@@ -223,7 +223,6 @@ class IntentExecutionPrecheckService
             'order_type' => (bool) ($riskSnapshot['allow_partial_fill'] ?? true) ? 'GTC' : 'FOK',
             'defer_exec' => false,
             'expiration' => '0',
-            'nonce' => '0',
         ];
 
         return [
