@@ -195,7 +195,9 @@ class IntentExecutionPrecheckService
             return $this->failure('daily_limit_exceeded', ['risk_snapshot' => $riskSnapshot]);
         }
 
-        $slippageAnchorPrice = $executionPrice;
+        $slippageAnchorPrice = preg_match('/^\d+(\.\d+)?$/', $leaderPrice) === 1 && bccomp($leaderPrice, '0', 8) === 1
+            ? $leaderPrice
+            : $executionPrice;
         $slippage = $this->trading->evaluateSlippage(
             (string) $intent->token_id,
             $side,
@@ -213,6 +215,10 @@ class IntentExecutionPrecheckService
             ]);
         }
 
+        $resolvedOrderType = (bool) ($riskSnapshot['allow_partial_fill'] ?? true) ? 'GTC' : 'FOK';
+        $resolvedExpiration = '0';
+        $resolvedDeferExec = false;
+
         $requestPayload = [
             'token_id' => (string) $intent->token_id,
             'market_id' => $contextMarketId,
@@ -220,9 +226,9 @@ class IntentExecutionPrecheckService
             'side' => $side,
             'price' => $normalizedPrice,
             'size' => $normalizedSize,
-            'order_type' => (bool) ($riskSnapshot['allow_partial_fill'] ?? true) ? 'GTC' : 'FOK',
-            'defer_exec' => false,
-            'expiration' => '0',
+            'order_type' => $resolvedOrderType,
+            'defer_exec' => $resolvedDeferExec,
+            'expiration' => $resolvedExpiration,
         ];
 
         return [
@@ -258,6 +264,10 @@ class IntentExecutionPrecheckService
                 'risk_snapshot' => $riskSnapshot,
                 'slippage' => $slippage,
                 'readiness' => $readiness,
+                'resolved_order_type' => $resolvedOrderType,
+                'resolved_expiration' => $resolvedExpiration,
+                'resolved_defer_exec' => $resolvedDeferExec,
+                'slippage_anchor_price' => $slippageAnchorPrice,
             ], static fn ($value) => $value !== null),
         ];
     }

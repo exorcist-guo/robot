@@ -53,6 +53,11 @@ class PmCreateOrderIntentsJob implements ShouldQueue
 
         $tasks = $trade->leader->copyTasks()->where('status', 1)->get();
         foreach ($tasks as $task) {
+            $existingIntent = PmOrderIntent::query()
+                ->where('copy_task_id', (int) $task->id)
+                ->where('leader_trade_id', (int) $trade->id)
+                ->first();
+
             $sizingResult = $sizing->build($task, $trade);
             $leaderRole = (string) ($trade->leader_role ?? $trade->raw['leader_role'] ?? 'unknown');
             $makerLimit = (string) ($task->maker_max_quantity_per_token ?? '0');
@@ -71,7 +76,7 @@ class PmCreateOrderIntentsJob implements ShouldQueue
                     (int) $task->member_id,
                     (int) $task->id,
                     (string) $trade->token_id,
-                    $intent?->id
+                    $existingIntent?->id
                 );
                 $plannedQuantity = (string) ($sizingResult['planned_quantity'] ?? '0');
                 $nextOpenQuantity = BigDecimal::of($currentOpenQuantity)
@@ -112,7 +117,7 @@ class PmCreateOrderIntentsJob implements ShouldQueue
                     'skip_category' => $sizingResult['skip_reason'] ? 'sizing' : null,
                     'risk_snapshot' => $sizingResult['risk_snapshot'],
                     'decision_payload' => array_merge(
-                        is_array($intent?->decision_payload ?? null) ? $intent->decision_payload : [],
+                        is_array($existingIntent?->decision_payload ?? null) ? $existingIntent->decision_payload : [],
                         ['sizing' => $sizingResult]
                     ),
                     'execution_mode' => (bool) config('pm.copy_dry_run', false) ? 'dry_run' : 'live',
