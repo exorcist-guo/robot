@@ -115,6 +115,13 @@ class PmExecuteOrderIntentJob implements ShouldQueue
         }
 
         if (
+            strtoupper((string) $intent->side) === PolymarketTradingService::SIDE_BUY
+            && $this->autoApproveBuyAllowanceIfNeeded($intent, $wallet, $trading)
+        ) {
+            return;
+        }
+
+        if (
             strtoupper((string) $intent->side) === PolymarketTradingService::SIDE_SELL
             // 卖单优先检查并自动补 token 授权，授权提交后本次先结束，等待后续重试再真正下单。
             && $this->autoApproveSellAllowanceIfNeeded($intent, $wallet, $trading)
@@ -289,6 +296,52 @@ class PmExecuteOrderIntentJob implements ShouldQueue
                 return;
             }
         }
+    }
+
+    private function autoApproveBuyAllowanceIfNeeded(
+        PmOrderIntent $intent,
+        \App\Models\Pm\PmCustodyWallet $wallet,
+        PolymarketTradingService $trading
+    ): bool {
+        $status = $trading->getAllowanceStatus($wallet);
+        if (($status['is_approved'] ?? false) === true) {
+            return false;
+        }
+
+        $decisionPayload = is_array($intent->decision_payload) ? $intent->decision_payload : [];
+        $autoApprove = is_array($decisionPayload['auto_approve_buy'] ?? null) ? $decisionPayload['auto_approve_buy'] : [];
+        $submitted = is_array($autoApprove['submitted'] ?? null) ? $autoApprove['submitted'] : [];
+        if ($submitted !== []) {
+            $intent->execution_stage = 'waiting_approval';
+            $intent->decision_payload = array_merge($decisionPayload, [
+                'auto_approve_buy' => array_merge($autoApprove, [
+                    'status' => $status,
+                    'waiting' => true,
+                    'checked_at' => now()->toDateTimeString(),
+                ]),
+            ]);
+            $intent->save();
+            $this->release(15);
+            return true;
+        }
+
+        $approval = $trading->approveForSide($wallet, PolymarketTradingService::SIDE_BUY);
+        try {
+            \Illuminate\Support\Facades\Cache::forget('wallet_readiness:' . $wallet->id . ':' . PolymarketTradingService::SIDE_BUY . ':collateral');
+        } catch (\Throwable) {
+        }
+
+        $intent->execution_stage = 'waiting_approval';
+        $intent->decision_payload = array_merge($decisionPayload, [
+            'auto_approve_buy' => [
+                'submitted' => $approval,
+                'status' => $status,
+                'checked_at' => now()->toDateTimeString(),
+            ],
+        ]);
+        $intent->save();
+        $this->release(15);
+        return true;
     }
 
     private function autoApproveSellAllowanceIfNeeded(
