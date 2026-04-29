@@ -46,16 +46,17 @@ class PolymarketDataClient
     /**
      * @return array<int, array<string,mixed>>
      */
-    public function getPositionsByUser(string $user): array
+    public function getPositionsByUser(string $user, int $limit = 100, int $offset = 0): array
     {
-        $limit = 100;
-        $offset = 0;
         $all = [];
 
         while (true) {
             $res = $this->client->get('positions', [
                 'query' => [
                     'user' => $user,
+                    'sortBy' => 'CURRENT',
+                    'sortDirection' => 'DESC',
+                    'sizeThreshold' => '.1',
                     'limit' => $limit,
                     'offset' => $offset,
                 ],
@@ -187,6 +188,74 @@ class PolymarketDataClient
 
         $json = json_decode($res->getBody()->getContents(), true);
         return is_array($json) ? array_values($json) : [];
+    }
+
+    /**
+     * @param array<string,mixed> $position
+     * @return array<string,mixed>
+     */
+    public function normalizeLeaderboardPosition(string $address, array $position): array
+    {
+        $avgPrice = (string) ($position['avgPrice'] ?? '0');
+        $currentPrice = (string) ($position['curPrice'] ?? '0');
+        $size = (string) ($position['size'] ?? $position['totalBought'] ?? '0');
+        $investedUsdc = $this->decimalToUsdcAtomic($position['initialValue'] ?? null)
+            ?? $this->toUsdcAtomicSafe($avgPrice, $size);
+        $pnlAmount = $this->decimalToUsdcAtomic($position['cashPnl'] ?? $position['realizedPnl'] ?? null) ?? 0;
+        $profitAmount = max(0, $pnlAmount);
+        $lossAmount = max(0, -$pnlAmount);
+        $isWin = null;
+        if (preg_match('/^\d+(\.\d+)?$/', $currentPrice) === 1) {
+            if (bccomp($currentPrice, '0.99', 4) >= 0) {
+                $isWin = true;
+            } elseif (bccomp($currentPrice, '0.01', 4) <= 0) {
+                $isWin = false;
+            }
+        }
+        $pnlStatus = $isWin === true ? 'profit' : ($isWin === false ? 'loss' : 'flat');
+        $pnlRatioBps = $this->decimalToBps($position['percentPnl'] ?? $position['percentRealizedPnl'] ?? null);
+        $time = $this->normalizeTradeTime($position);
+        if ($time === null && !empty($position['endDate']) && (string) $position['endDate'] !== '1970-01-01') {
+            try {
+                $time = Carbon::parse((string) $position['endDate']);
+            } catch (\Throwable) {
+                $time = null;
+            }
+        }
+        $externalPositionId = 'cp_' . sha1(json_encode([
+            'proxyWallet' => strtolower((string) ($position['proxyWallet'] ?? $address)),
+            'asset' => (string) ($position['asset'] ?? ''),
+            'conditionId' => (string) ($position['conditionId'] ?? ''),
+            'outcome' => (string) ($position['outcome'] ?? ''),
+            'endDate' => (string) ($position['endDate'] ?? ''),
+        ], JSON_UNESCAPED_UNICODE));
+
+        return [
+            'address' => strtolower($address),
+            'external_position_id' => $externalPositionId,
+            'market_id' => (string) ($position['conditionId'] ?? '') ?: null,
+            'token_id' => (string) ($position['asset'] ?? '') ?: null,
+            'title' => (string) ($position['title'] ?? ''),
+            'slug' => (string) ($position['slug'] ?? ''),
+            'outcome' => (string) ($position['outcome'] ?? ''),
+            'opposite_outcome' => (string) ($position['oppositeOutcome'] ?? ''),
+            'avg_price' => $avgPrice,
+            'price' => $currentPrice,
+            'size' => $size,
+            'invested_amount_usdc' => $investedUsdc,
+            'pnl_amount_usdc' => $pnlAmount,
+            'profit_amount_usdc' => $profitAmount,
+            'loss_amount_usdc' => $lossAmount,
+            'is_win' => $isWin,
+            'pnl_status' => $pnlStatus,
+            'pnl_ratio_bps' => $pnlRatioBps,
+            'order_status' => 'open',
+            'is_settled' => false,
+            'traded_at' => $time,
+            'settled_at' => null,
+            'last_synced_at' => now(),
+            'raw' => $position,
+        ];
     }
 
     /**

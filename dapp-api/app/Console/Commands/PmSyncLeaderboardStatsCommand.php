@@ -48,9 +48,10 @@ class PmSyncLeaderboardStatsCommand extends Command
         $this->info('已同步排行榜用户: ' . $users->count());
 
         foreach ($users as $user) {
-            // 逐个用户拉取 closed positions。
-            // 这里采用增量模式：命中本地已有记录就停止当前用户继续翻页，
-            // 所以多次执行时成本会越来越低。
+            //通过接口 https://data-api.polymarket.com/positions?user=0xbddf61af533ff524d27154e589d2d7a81510c684&sortBy=CURRENT&sortDirection=DESC&sizeThreshold=.1&limit=30&offset=0
+            //获取持仓的订单,获取全部的持仓订单,计算亏损概率是 99%,时认定为输单,计算盈利概率是 99%,时认定为赢单,其他情况认定为持平单
+            //当在 syncClosedPositions获取的记录包含了接口获取的记录,用 syncClosedPositions 记录覆盖接口记录,通过 address 和external_position_id 判断是否是同一个订单
+            $this->syncOpenPositions($dataClient, $user);
             $this->syncClosedPositions($dataClient, $user);
 
             // 用户的已平仓记录更新后，立刻基于本地表重算该用户 day/week/month/all 统计。
@@ -162,6 +163,48 @@ class PmSyncLeaderboardStatsCommand extends Command
             ->get();
     }
 
+    private function syncOpenPositions(PolymarketDataClient $dataClient, PmLeaderboardUser $user): void
+    {
+        $offset = 0;
+        $limit = 30;
+
+        while (true) {
+            if ($offset > 3000) {
+                return;
+            }
+
+            try {
+                $items = $dataClient->getPositionsByUser($user->address, $limit, $offset);
+            } catch (\Throwable $e) {
+                $this->warn("拉取 {$user->address} positions 失败: {$e->getMessage()}");
+                return;
+            }
+
+            if ($items === []) {
+                break;
+            }
+
+            foreach ($items as $position) {
+                $normalized = $dataClient->normalizeLeaderboardPosition($user->address, $position);
+                PmLeaderboardUserTrade::updateOrCreate(
+                    [
+                        'leaderboard_user_id' => $user->id,
+                        'external_position_id' => $normalized['external_position_id'],
+                    ],
+                    [
+                        'address' => $user->address,
+                    ] + $normalized
+                );
+            }
+
+            if (count($items) < $limit) {
+                break;
+            }
+
+            $offset += $limit;
+        }
+    }
+
     /**
      * 按用户地址抓取 closed positions，并做增量入库。
      *
@@ -206,10 +249,15 @@ class PmSyncLeaderboardStatsCommand extends Command
                     return;
                 }
 
-                PmLeaderboardUserTrade::create([
-                    'leaderboard_user_id' => $user->id,
-                    'address' => $user->address,
-                ] + $normalized);
+                PmLeaderboardUserTrade::updateOrCreate(
+                    [
+                        'leaderboard_user_id' => $user->id,
+                        'external_position_id' => $normalized['external_position_id'],
+                    ],
+                    [
+                        'address' => $user->address,
+                    ] + $normalized
+                );
             }
 
             if (count($items) < $limit) {
@@ -252,7 +300,7 @@ class PmSyncLeaderboardStatsCommand extends Command
             // closed-positions 表里每一条都是已结束记录，所以这里 total_orders 就等于 closedCount。
             $totalOrders = $items->count();
             $winOrders = $items->filter(fn (PmLeaderboardUserTrade $trade) => $trade->is_win === true)->count();
-            $lossOrders = $items->filter(fn (PmLeaderboardUserTrade $trade) => (int) $trade->loss_amount_usdc > 0)->count();
+            $lossOrders = $items->filter(fn (PmLeaderboardUserTrade $trade) => $trade->is_win === false)->count();
             $investedAmount = (int) $items->sum('invested_amount_usdc');
             $profitAmount = (int) $items->sum('pnl_amount_usdc');
             $winAmount = (int) $items->sum('profit_amount_usdc');

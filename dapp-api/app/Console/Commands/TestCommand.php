@@ -6,6 +6,7 @@ use App\Models\Pm\PmCustodyWallet;
 use App\Services\Pm\PolymarketTradingService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Carbon;
+use App\Services\Pm\PolymarketDataClient;
 
 class TestCommand extends Command
 {
@@ -26,11 +27,12 @@ class TestCommand extends Command
     /**
      * Execute the console command.
      */
-    public function handle(PolymarketTradingService $trading)
+    public function handle(PolymarketTradingService $trading,PolymarketDataClient $dataClient)
     {
 
-        $a = $this->buildCurrentRoundSlugFromString('2026-04-08 09:14:33');
-        echo $a;
+        $positions = $dataClient->getPositionsByUser('0xb45a797faa52b0fd8adc56d30382022b7b12192c');
+        $positionSize = $dataClient->resolvePositionSizeByToken($positions, '96862858153419745448652216048039358304355088607501609917037890273651321050946');
+        var_dump($positionSize);
         exit;
         $order = \App\Models\Pm\PmOrder::find(360);
         if (!$order) {
