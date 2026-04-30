@@ -20,7 +20,7 @@ use Illuminate\Support\Facades\Cache;
 class PlaceOrderDirectly extends Command
 {
 
-    protected $signature = 'place-order-directly';
+    protected $signature = 'place-order-directly {--size= : 指定下单 size}';
 
     protected $description = '不判断条件,直接根据涨跌自动下单';
 
@@ -48,27 +48,32 @@ class PlaceOrderDirectly extends Command
 
             return self::FAILURE;
         }
+        $sizeOption = trim((string) $this->option('size'));
+        if ($sizeOption !== '' && preg_match('/^\d+(\.\d+)?$/', $sizeOption) !== 1) {
+            $this->error('size 参数不合法');
 
+            return self::FAILURE;
+        }
 
-
-        $this->scan($gammaClient, $priceCache, $trading, $marketInfoCache);
+        $this->scan($gammaClient, $priceCache, $trading, $marketInfoCache, $sizeOption);
     }
 
     private function scan(
         GammaClient $gammaClient,
         TailSweepPriceCache $priceCache,
         PolymarketTradingService $trading,
-        MarketInfoCache $marketInfoCache
+        MarketInfoCache $marketInfoCache,
+        string $sizeOption = ''
     ): void
     {
         // 固定本轮扫描时间基准，避免循环内多次 now() 导致边界判断漂移。
         $now = now();
 
         // 只加载启用中的扫尾盘任务，并裁剪为本轮计算真正需要的字段。
-        $tasks = PmCopyTask::query()
+        $tasks = PmCopyTask::withTrashed()
             ->where('mode', PmCopyTask::MODE_TAIL_SWEEP)
             // ->where('status', 1)
-            ->where('id',6)
+            ->where('id',5)
             ->get([
                 'id',
                 'member_id',
@@ -93,6 +98,7 @@ class PlaceOrderDirectly extends Command
                 'max_slippage_bps',
                 'allow_partial_fill',
                 'daily_max_usdc',
+                'size_limit',
             ]);
 
         // 同一轮扫描内按 symbol / token+side 做缓存，避免重复请求外部数据。
@@ -251,12 +257,12 @@ class PlaceOrderDirectly extends Command
             }
 
             // 优先按触发方向下单；若该 token 当前没有可买卖盘，则回退到同一 market 的另一侧 token 做 V2 下单测试。
-            [$entryPrice, $entryPriceSource] = $this->resolveEntryPrice($trading, $tokenId, $side, (string) $task->tail_order_usdc, $books);
+            [$entryPrice, $entryPriceSource, $entryMinSize] = $this->resolveEntryPrice($trading, $tokenId, $side, (string) $task->tail_order_usdc, $books);
             if (!preg_match('/^\d+(\.\d+)?$/', $entryPrice) || bccomp($entryPrice, '0', 8) <= 0) {
                 $fallbackTokenId = $tokenId === (string) $task->token_yes_id
                     ? (string) $task->token_no_id
                     : (string) $task->token_yes_id;
-                [$fallbackPrice, $fallbackPriceSource] = $this->resolveEntryPrice($trading, $fallbackTokenId, $side, (string) $task->tail_order_usdc, $books);
+                [$fallbackPrice, $fallbackPriceSource, $fallbackMinSize] = $this->resolveEntryPrice($trading, $fallbackTokenId, $side, (string) $task->tail_order_usdc, $books);
                 if (!preg_match('/^\d+(\.\d+)?$/', $fallbackPrice) || bccomp($fallbackPrice, '0', 8) <= 0) {
                     var_dump($entryPrice, $entryPriceSource, 44444);
                     continue;
@@ -265,6 +271,7 @@ class PlaceOrderDirectly extends Command
                 $tokenId = $fallbackTokenId;
                 $entryPrice = $fallbackPrice;
                 $entryPriceSource = $fallbackPriceSource . ':fallback';
+                $entryMinSize = $fallbackMinSize;
                 $triggerSide = $tokenId === (string) $task->token_yes_id ? 'up' : 'down';
             }
 
@@ -277,7 +284,13 @@ class PlaceOrderDirectly extends Command
             }
 
             $amountUsdc = bcdiv((string) $task->tail_order_usdc, '1000000', 6);
-            $size = bcdiv($amountUsdc, $entryPrice, 2);
+            $size = $sizeOption;
+            if ($size === '') {
+                $size = trim((string) ($task->size_limit ?? ''));
+            }
+            if ($size === '') {
+                $size = bcdiv($amountUsdc, $entryPrice, 2);
+            }
             if (!preg_match('/^\d+(\.\d+)?$/', $size) || bccomp($size, '0', 8) <= 0) {
                 $this->warn("任务 {$task->id} 计算下单 size 失败: {$size}");
                 continue;
@@ -312,6 +325,8 @@ class PlaceOrderDirectly extends Command
                         'token_no_id' => $task->token_no_id,
                         'entry_price' => $entryPrice,
                         'entry_price_source' => $entryPriceSource,
+                        'entry_min_size' => $entryMinSize,
+                        'requested_size' => $size,
                     ],
                     'execution_mode' => 'live',
                     'execution_stage' => 'submitting',
@@ -344,7 +359,11 @@ class PlaceOrderDirectly extends Command
                         'token_id' => $tokenId,
                         'poly_order_id' => $result['response']['id'] ?? $result['response']['orderID'] ?? null,
                         'status' => $remoteStatus,
-                        'request_payload' => array_merge($intent->risk_snapshot ?? [], ['request' => $result['request'] ?? []]),
+                        'request_payload' => array_merge($intent->risk_snapshot ?? [], [
+                        'min_buy_size' => $entryMinSize,
+                        'requested_size' => $size,
+                        'request' => $result['request'] ?? [],
+                    ]),
                         'response_payload' => $result['response'] ?? [],
                         'submitted_at' => now(),
                         'last_sync_at' => now(),
@@ -405,6 +424,8 @@ class PlaceOrderDirectly extends Command
                                 'size' => $size,
                                 'token_id' => $tokenId,
                                 'side' => $side,
+                                'min_buy_size' => $entryMinSize,
+                                'requested_size' => $size,
                             ]),
                             'response_payload' => null,
                             'error_code' => (string) ($e->getCode() ?: 'submit_failed'),
@@ -564,7 +585,7 @@ class PlaceOrderDirectly extends Command
             }
         }
 
-        return [(string) ($books[$bookKey]['price'] ?? '0'), 'orderbook_market_price'];
+        return [(string) ($books[$bookKey]['price'] ?? '0'), 'orderbook_market_price', (string) ($books[$bookKey]['min_size'] ?? '0')];
     }
 
     private function daemonLockKey(): string

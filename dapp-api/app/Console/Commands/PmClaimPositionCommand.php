@@ -86,8 +86,11 @@ class PmClaimPositionCommand extends Command
             $currentValue = (float) ($pos['currentValue'] ?? 0);
             $isRedeemable = (bool) ($pos['redeemable'] ?? false);
             $hasChainBalance = $this->hasChainTokenBalance($wallet, (string) ($pos['asset'] ?? ''));
-            $canRedeemLosing = $includeLosing && $currentValue <= 0 && $isRedeemable && $hasChainBalance;
-            $isClaimable = (($currentValue > 0 && $isRedeemable) || $canRedeemLosing) && $hasChainBalance;
+            $canRedeemLosing = $includeLosing
+                && $currentValue > 0
+                && $isRedeemable
+                && $hasChainBalance;
+            $isClaimable = $currentValue > 0 && $isRedeemable && $hasChainBalance;
             $isLaggingRedeemed = $currentValue > 0 && $isRedeemable && !$hasChainBalance;
 
             if ($isClaimable) {
@@ -194,6 +197,13 @@ class PmClaimPositionCommand extends Command
             $groupIndex++;
             $primaryPosition = $positionsGroup[0];
             $totalCurrentValue = array_sum(array_map(static fn (array $pos) => (float) ($pos['currentValue'] ?? 0), $positionsGroup));
+            if ($totalCurrentValue <= 0) {
+                $failCount++;
+                $this->warn("[{$groupIndex}/{$totalCount}] 跳过领取: 当前可领取金额为 $0.00");
+                $this->line("Condition ID: " . ($primaryPosition['conditionId'] ?? 'N/A'));
+                $this->newLine();
+                continue;
+            }
             $this->info("[{$groupIndex}/{$totalCount}] 准备领取:");
             $this->line("市场: " . ($primaryPosition['title'] ?? 'Unknown'));
             $this->line('金额: $' . number_format($totalCurrentValue, 2));
@@ -262,6 +272,14 @@ class PmClaimPositionCommand extends Command
     private function claimPosition(PmCustodyWallet $wallet, array $positions, PmPrivateKeyResolver $resolver, PolygonRpcService $rpcService): array
     {
         $position = $positions[0] ?? [];
+        $totalCurrentValue = array_sum(array_map(static fn (array $pos) => (float) ($pos['currentValue'] ?? 0), $positions));
+        if ($totalCurrentValue <= 0) {
+            return [
+                'success' => false,
+                'error' => 'nothing_to_claim',
+                'tx_hash' => null,
+            ];
+        }
         $this->info("\n========== 执行领取 ==========\n");
 
         // 1. 解析私钥
@@ -667,7 +685,6 @@ class PmClaimPositionCommand extends Command
     {
         $minAge = (int) $this->option('min-age');
         $dryRun = $this->option('dry-run');
-        $includeLosing = (bool) $this->option('include-losing');
         $now = time();
         $cutoffTime = $now - $minAge;
 
@@ -746,12 +763,10 @@ class PmClaimPositionCommand extends Command
                         $age = $now - $orderTime;
 
                         // 只处理超过最小年龄、且接口可领、且链上仍有 token 余额的持仓
-                        if ($age >= $minAge && (($currentValue > 0 && $isRedeemable) || ($includeLosing && $currentValue <= 0 && $isRedeemable)) && $hasChainBalance) {
+                        if ($age >= $minAge && $currentValue > 0 && $isRedeemable && $hasChainBalance) {
                             $claimablePositions[] = $pos;
                             $totalValue += max($currentValue, 0);
-                            $isLosingRedeemable = $includeLosing && $currentValue <= 0 && $isRedeemable;
-                            $prefix = $isLosingRedeemable ? '♻️ 可兑换(已输)' : '✅ 可领取';
-                            $this->line("  {$prefix}: " . ($pos['title'] ?? 'Unknown') . " - $" . number_format($currentValue, 2) . " (订单时间: " . date('Y-m-d H:i:s', $orderTime) . ", 年龄: " . round($age / 3600, 1) . "h)");
+                            $this->line("  ✅ 可领取: " . ($pos['title'] ?? 'Unknown') . " - $" . number_format($currentValue, 2) . " (订单时间: " . date('Y-m-d H:i:s', $orderTime) . ", 年龄: " . round($age / 3600, 1) . "h)");
                         } else {
                             $this->line("  ⏳ 太新: " . ($pos['title'] ?? 'Unknown') . " - $" . number_format($currentValue, 2) . " (订单时间: " . date('Y-m-d H:i:s', $orderTime) . ", 年龄: " . round($age / 3600, 1) . "h)");
                         }

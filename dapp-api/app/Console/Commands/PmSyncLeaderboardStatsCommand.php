@@ -14,7 +14,7 @@ class PmSyncLeaderboardStatsCommand extends Command
     /**
      * --limit: 控制每个排行榜窗口（week / month）最多同步多少个用户。
      */
-    protected $signature = 'pm:sync-leaderboard-stats {--limit=30 : 每个榜单同步前 N 人}';
+    protected $signature = 'pm:sync-leaderboard-stats {--limit=30 : 每个榜单同步前 N 人} {--address= : 只同步指定用户地址}';
 
     /**
      * 命令职责：
@@ -34,6 +34,11 @@ class PmSyncLeaderboardStatsCommand extends Command
     {
         // 先把命令行传入的 limit 收敛到 1~100，避免误传过大值把远端接口打得过重。
         $limit = max(1, min(100, (int) $this->option('limit')));
+        $targetAddress = strtolower(trim((string) $this->option('address')));
+        if ($targetAddress !== '' && !preg_match('/^0x[a-f0-9]{40}$/', $targetAddress)) {
+            $this->error('address 格式不正确');
+            return self::FAILURE;
+        }
 
         // 分别拉取周榜和月榜。
         // 之所以两次拉，是因为有些用户可能只出现在某一个榜单窗口里，
@@ -44,7 +49,7 @@ class PmSyncLeaderboardStatsCommand extends Command
         // 先把两个窗口的榜单用户合并、标准化并写入本地 users 表。
         // 这一步只负责“有哪些用户、基础名次与资料是什么”，
         // 不负责拉订单明细。
-        $users = $this->syncLeaderboardUsers($dataClient, $weekEntries, $monthEntries);
+        $users = $this->syncLeaderboardUsers($dataClient, $weekEntries, $monthEntries, $targetAddress);
         $this->info('已同步排行榜用户: ' . $users->count());
 
         foreach ($users as $user) {
@@ -95,7 +100,7 @@ class PmSyncLeaderboardStatsCommand extends Command
      * 同一个地址可能只出现在 week，或者只出现在 month，
      * 所以这里不能只依赖某一个窗口，必须把两个窗口的数据合并后再入库。
      */
-    private function syncLeaderboardUsers(PolymarketDataClient $dataClient, array $weekEntries, array $monthEntries)
+    private function syncLeaderboardUsers(PolymarketDataClient $dataClient, array $weekEntries, array $monthEntries, string $targetAddress = '')
     {
         $weekMap = [];
         foreach ($weekEntries as $entry) {
@@ -114,13 +119,26 @@ class PmSyncLeaderboardStatsCommand extends Command
         }
 
         $addresses = array_values(array_unique(array_merge(array_keys($weekMap), array_keys($monthMap))));
+        if ($targetAddress !== '') {
+            $addresses = [$targetAddress];
+        }
         $now = now();
 
         foreach ($addresses as $address) {
             $week = $weekMap[$address] ?? null;
             $month = $monthMap[$address] ?? null;
             // 优先取 week，没有再退回 month，作为用户基础资料来源。
-            $base = $week ?? $month;
+            $base = $week ?? $month ?? [
+                'address' => $address,
+                'proxy_wallet' => $address,
+                'username' => '',
+                'x_username' => '',
+                'profile_image' => '',
+                'verified_badge' => false,
+                'volume' => null,
+                'pnl' => null,
+                'raw' => null,
+            ];
 
             PmLeaderboardUser::updateOrCreate(
                 ['address' => $address],
@@ -145,16 +163,22 @@ class PmSyncLeaderboardStatsCommand extends Command
             );
         }
 
-        PmLeaderboardUser::query()
-            ->whereNotIn('address', $addresses)
-            ->update([
-                // 这次榜单没出现的用户，周/月排名直接清零，避免保留旧排名。
-                'week_rank' => 0,
-                'month_rank' => 0,
-            ]);
+        if ($targetAddress === '') {
+            PmLeaderboardUser::query()
+                ->whereNotIn('address', $addresses)
+                ->update([
+                    // 这次榜单没出现的用户，周/月排名直接清零，避免保留旧排名。
+                    'week_rank' => 0,
+                    'month_rank' => 0,
+                ]);
+        }
 
         return PmLeaderboardUser::query()
-            ->where(function ($query) {
+            ->when($targetAddress !== '', fn ($query) => $query->where('address', $targetAddress))
+            ->where(function ($query) use ($targetAddress) {
+                if ($targetAddress !== '') {
+                    return;
+                }
                 $query->where('week_rank', '>', 0)
                     ->orWhere('month_rank', '>', 0);
             })
