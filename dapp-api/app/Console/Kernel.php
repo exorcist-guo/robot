@@ -68,14 +68,14 @@ class Kernel extends ConsoleKernel
         ->withoutOverlapping();
 
         // 每分钟检查一次隔一轮预测挂单机会
-        $schedule->command('pm:preplace-next-round-order --once')
-        ->everyMinute()
-        ->withoutOverlapping();
+        // $schedule->command('pm:preplace-next-round-order --once')
+        // ->everyMinute()
+        // ->withoutOverlapping();
 
-        // 每分钟结算已到期的隔一轮预测订单
-        $schedule->command('pm:skip-round-settle --once')
-        ->everyMinute()
-        ->withoutOverlapping();
+        // // 每分钟结算已到期的隔一轮预测订单
+        // $schedule->command('pm:skip-round-settle --once')
+        // ->everyMinute()
+        // ->withoutOverlapping();
 
     }
 

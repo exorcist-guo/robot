@@ -126,10 +126,6 @@ class IntentExecutionPrecheckService
         $minOrderSize = isset($marketPriceQuote['min_size']) && preg_match('/^\d+(\.\d+)?$/', (string) $marketPriceQuote['min_size'])
             ? BigDecimal::of((string) $marketPriceQuote['min_size'])
             : null;
-        if ($side === PolymarketTradingService::SIDE_BUY && $minOrderSize !== null && $size->isLessThan($minOrderSize)) {
-            $size = $minOrderSize;
-            $usdc = $minOrderSize->multipliedBy($executionPrice)->toScale(6, RoundingMode::UP);
-        }
         if ($side === PolymarketTradingService::SIDE_SELL && $sellConsumableSize !== null && $size->isGreaterThan($sellConsumableSize)) {
             $size = $sellConsumableSize;
             $usdc = $sellConsumableSize->multipliedBy($executionPrice)->toScale(6, RoundingMode::DOWN);

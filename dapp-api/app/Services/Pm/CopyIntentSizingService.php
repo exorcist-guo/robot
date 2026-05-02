@@ -15,21 +15,33 @@ class CopyIntentSizingService
     public function build(PmCopyTask $task, PmLeaderTrade $trade): array
     {
         $rawTargetUsdc = (int) floor(((int) $trade->size_usdc) * (((int) $task->ratio_bps) / 10000));
-        $clampedUsdc = $rawTargetUsdc;
-        $clampReason = null;
+        if($trade->leader_role == 'maker'){
+            //跟单数量
+            $raw_leader_position_size = bcdiv($trade->leader_position_size * $task->ratio_bps,10000,2);
+            //完善功能,通过  $raw_leader_position_size - pm_leader_trades 中已跟单的数量,得到本次跟单的数量,并转换为 usdc 数量就是 $rawTargetUsdc
 
-        if ((int) $task->min_usdc > 0 && $clampedUsdc < (int) $task->min_usdc) {
-            $clampedUsdc = (int) $task->min_usdc;
-            $clampReason = 'raised_to_min_usdc';
+
+
         }
 
-        if ((int) $task->max_usdc > 0 && $clampedUsdc > (int) $task->max_usdc) {
+
+
+        $clampedUsdc = $rawTargetUsdc;
+        $clampReason = null;
+        $status = 0;
+        $skipReason = null;
+
+        if ((int) $task->min_usdc > 0 && $rawTargetUsdc < (int) $task->min_usdc) {
+            $status = 2;
+            $skipReason = 'below_min_usdc';
+            $clampReason = 'below_min_usdc_skipped';
+        }
+
+        if ($status === 0 && (int) $task->max_usdc > 0 && $clampedUsdc > (int) $task->max_usdc) {
             $clampedUsdc = (int) $task->max_usdc;
             $clampReason = 'capped_by_max_usdc';
         }
 
-        $status = 0;
-        $skipReason = null;
         if ($rawTargetUsdc <= 0) {
             $status = 2;
             $skipReason = 'target_usdc_too_small';
