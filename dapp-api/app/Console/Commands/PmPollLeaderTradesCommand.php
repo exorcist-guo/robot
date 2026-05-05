@@ -85,14 +85,22 @@ class PmPollLeaderTradesCommand extends Command
             if (empty($normalized['token_id']) || empty($normalized['trade_id'])) {
                 continue;
             }
-
+            // var_dump($normalized);
             // 调试输出：打印成交时间和归一化后的完整结构，便于排查来源数据异常。
             // var_dump(date('Y-m-d H:i:s', $normalized['traded_at']), $normalized);
+            $size = 0;
+            if(!empty($normalized['raw']['size'])){
+                $size = $normalized['raw']['size'];
+                if($normalized['side'] == 'SELL'){
+                    $size = -$size;
+                }
+            }
             $model = PmLeaderTrade::updateOrCreate(
                 ['trade_id' => $normalized['trade_id']],
                 array_merge($normalized, [
                     'leader_id' => $leader->id,
                     'leader_role' => $normalized['leader_role'] ?? ($normalized['raw']['leader_role'] ?? null),
+                    'size' => $size,
                 ])
             );
 

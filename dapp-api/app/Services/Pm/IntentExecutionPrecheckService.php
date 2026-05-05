@@ -123,9 +123,6 @@ class IntentExecutionPrecheckService
         } else {
             $size = $usdc->dividedBy($executionPrice, $sizeScale, RoundingMode::DOWN);
         }
-        $minOrderSize = isset($marketPriceQuote['min_size']) && preg_match('/^\d+(\.\d+)?$/', (string) $marketPriceQuote['min_size'])
-            ? BigDecimal::of((string) $marketPriceQuote['min_size'])
-            : null;
         if ($side === PolymarketTradingService::SIDE_SELL && $sellConsumableSize !== null && $size->isGreaterThan($sellConsumableSize)) {
             $size = $sellConsumableSize;
             $usdc = $sellConsumableSize->multipliedBy($executionPrice)->toScale(6, RoundingMode::DOWN);
@@ -191,9 +188,7 @@ class IntentExecutionPrecheckService
             return $this->failure('daily_limit_exceeded', ['risk_snapshot' => $riskSnapshot]);
         }
 
-        $slippageAnchorPrice = preg_match('/^\d+(\.\d+)?$/', $leaderPrice) === 1 && bccomp($leaderPrice, '0', 8) === 1
-            ? $leaderPrice
-            : $executionPrice;
+        $slippageAnchorPrice = $executionPrice;
         $slippage = $this->trading->evaluateSlippage(
             (string) $intent->token_id,
             $side,
