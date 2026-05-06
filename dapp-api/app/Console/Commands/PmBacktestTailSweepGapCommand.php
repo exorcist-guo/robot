@@ -225,16 +225,21 @@ class PmBacktestTailSweepGapCommand extends Command
             $signalTriggered = bccomp($priceDiffAbs, $minPredictDiff, 8) !== -1;
             $nextPrediction = null;
             if ($signalTriggered) {
-                $followLosingPrediction = $mode === '3'
-                    && $result === 'lose'
-                    && $betLine !== null
-                    && (($lineLoseStreak[$betLine] ?? 0) >= 2)
-                    && $prediction !== null;
-                $nextPrediction = $followLosingPrediction
-                    ? $prediction
-                    : ($randomPredict
+                if ($mode === '3') {
+                    if ($prediction === null) {
+                        $nextPrediction = $randomPredict
+                            ? (random_int(0, 1) === 1 ? 'up' : 'down')
+                            : $actualDirection;
+                    } elseif ($result === 'lose' && $betLine !== null && (($lineLoseStreak[$betLine] ?? 0) >= 2)) {
+                        $nextPrediction = $actualDirection;
+                    } else {
+                        $nextPrediction = $prediction;
+                    }
+                } else {
+                    $nextPrediction = $randomPredict
                         ? (random_int(0, 1) === 1 ? 'up' : 'down')
-                        : $actualDirection);
+                        : $actualDirection;
+                }
             }
             $targetIndex = $i + 1;
             $scheduledLine = null;
@@ -567,7 +572,7 @@ class PmBacktestTailSweepGapCommand extends Command
     private function printMode1(array $result): void
     {
         $this->line(($result['mode'] ?? '1-gap') === '3-gap'
-            ? '模式三规则：基础规则与模式一一致；当连续亏损两次后，下一次预测改为沿用最近一次亏损时的预测方向'
+            ? '模式三规则：先锁定当前预测方向；只有连续失败两次，才切换成与真实方向一致的新预测方向'
             : '模式一规则：用上一组方向预测隔一组后的方向，例如 2 比 1 大，则预测 4 比 3 为涨');
         $this->table(['字段', '值'], [
             ['模式', $result['mode']],
