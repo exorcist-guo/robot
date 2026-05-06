@@ -11,7 +11,7 @@ class PmBacktestTailSweepCommand extends Command
 {
     protected $signature = 'pm:backtest-tail-sweep
         {period : day|week|month}
-        {--mode=1 : 仅支持 1 或 2}
+        {--mode=1 : 仅支持 1、2、3}
         {--symbol=btc/usd : 默认标的}
         {--amount=20 : 模式二买入金额，默认 20 USDC}
         {--min-predict-diff=10 : 模式一最小预测价差，支持单值或区间如 10-20}
@@ -25,19 +25,13 @@ class PmBacktestTailSweepCommand extends Command
         $mode = (string) $this->option('mode');
         $symbol = trim((string) $this->option('symbol')) ?: 'btc/usd';
 
-        if (!in_array($mode, ['1', '2'], true)) {
-            if ($mode === '3') {
-                $this->warn('模式三暂未开发');
-
-                return self::SUCCESS;
-            }
-
-            $this->error('mode 仅支持 1 或 2');
+        if (!in_array($mode, ['1', '2', '3'], true)) {
+            $this->error('mode 仅支持 1、2、3');
 
             return self::FAILURE;
         }
 
-        if ($mode === '1') {
+        if (in_array($mode, ['1', '3'], true)) {
             $minPredictDiffOption = trim((string) $this->option('min-predict-diff'));
             if (preg_match('/^(\d+)-(\d+)(?::(\d+))?$/', $minPredictDiffOption, $matches) === 1) {
                 $startDiff = (int) $matches[1];
@@ -58,7 +52,9 @@ class PmBacktestTailSweepCommand extends Command
                 $results = [];
                 $best = null;
                 for ($diff = $startDiff; $diff <= $endDiff; $diff += $step) {
-                    $item = $this->runMode1($symbol, $startAt, $endAt, (string) $diff);
+                    $item = $mode === '3'
+                        ? $this->runMode3($symbol, $startAt, $endAt, (string) $diff)
+                        : $this->runMode1($symbol, $startAt, $endAt, (string) $diff);
                     $results[] = $item;
                     if ($best === null || $this->compareNumericString((string) $item['net_profit'], (string) $best['net_profit']) === 1) {
                         $best = $item;
@@ -91,7 +87,9 @@ class PmBacktestTailSweepCommand extends Command
                 return self::FAILURE;
             }
 
-            $result = $this->runMode1($symbol, $startAt, $endAt, $minPredictDiffOption);
+            $result = $mode === '3'
+                ? $this->runMode3($symbol, $startAt, $endAt, $minPredictDiffOption)
+                : $this->runMode1($symbol, $startAt, $endAt, $minPredictDiffOption);
             $this->printMode1($result);
 
             return self::SUCCESS;
@@ -112,6 +110,16 @@ class PmBacktestTailSweepCommand extends Command
 
     private function runMode1(string $symbol, Carbon $startAt, Carbon $endAt, string $minPredictDiff = '10'): array
     {
+        return $this->runModeCore($symbol, $startAt, $endAt, $minPredictDiff, '1');
+    }
+
+    private function runMode3(string $symbol, Carbon $startAt, Carbon $endAt, string $minPredictDiff = '10'): array
+    {
+        return $this->runModeCore($symbol, $startAt, $endAt, $minPredictDiff, '3');
+    }
+
+    private function runModeCore(string $symbol, Carbon $startAt, Carbon $endAt, string $minPredictDiff, string $mode): array
+    {
         $rows = PmTailSweepRoundOpenPrice::query()
             ->where('symbol', $symbol)
             ->where('round_start_at', '>=', $startAt)
@@ -126,7 +134,7 @@ class PmBacktestTailSweepCommand extends Command
         $loseCount = 0;
         $sampleCount = 0;
         $prediction = null;
-        $baseBet = '5';
+        $baseBet = '1';
         $maxLoseResetLimit = 6;
         $resetLoseCount = 0;
         $currentBet = $baseBet;
@@ -195,7 +203,20 @@ class PmBacktestTailSweepCommand extends Command
                 }
             }
 
-            $nextPrediction = bccomp($priceDiffAbs, $minPredictDiff, 8) === -1 ? null : $actualDirection;
+            $nextPrediction = null;
+            if (bccomp($priceDiffAbs, $minPredictDiff, 8) !== -1) {
+                if ($mode === '3') {
+                    if ($prediction === null) {
+                        $nextPrediction = $actualDirection;
+                    } elseif ($result === 'lose' && $currentLoseStreak >= 2) {
+                        $nextPrediction = $actualDirection;
+                    } else {
+                        $nextPrediction = $prediction;
+                    }
+                } else {
+                    $nextPrediction = $actualDirection;
+                }
+            }
 
             if ((bool) $this->option('detail')) {
                 $details[] = [
@@ -233,7 +254,7 @@ class PmBacktestTailSweepCommand extends Command
         }
 
         return [
-            'mode' => '1',
+            'mode' => $mode,
             'symbol' => $symbol,
             'window_start' => $startAt->toDateTimeString(),
             'window_end' => $endAt->toDateTimeString(),
@@ -495,7 +516,9 @@ class PmBacktestTailSweepCommand extends Command
 
     private function printMode1(array $result): void
     {
-        $this->line('涨跌口径：开始价格 > 结束价格 记为涨，否则记为跌');
+        $this->line(($result['mode'] ?? '1') === '3'
+            ? '模式三规则：先锁定当前预测方向；只有连续失败两次，才切换成与真实方向一致的新预测方向'
+            : '涨跌口径：开始价格 > 结束价格 记为涨，否则记为跌');
         $this->table(['字段', '值'], [
             ['模式', $result['mode']],
             ['标的', $result['symbol']],
