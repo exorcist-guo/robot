@@ -17,6 +17,7 @@ class PmBacktestTailSweepGapCommand extends Command
         {--min-predict-diff=10 : 模式一最小预测价差，支持单值或区间如 10-20}
         {--date= : 指定日期(YYYY-MM-DD)，仅对 mode=1 生效，窗口为当天 00:00:00-23:59:59}
         {--random-predict : 模式一触发信号后随机预测涨跌，而不是沿用当前方向}
+        {--fallback-last-diff : 当本轮价差小于阈值时，向前回溯上一时间段的价差，直到找到满足阈值的为止}
         {--detail : 输出明细}';
 
     protected $description = '使用隔一轮预测规则回测 tail sweep 策略';
@@ -132,6 +133,7 @@ class PmBacktestTailSweepGapCommand extends Command
             ->values();
 
         $randomPredict = (bool) $this->option('random-predict');
+        $fallbackLastDiff = (bool) $this->option('fallback-last-diff');
 
         $details = [];
         $winCount = 0;
@@ -223,13 +225,30 @@ class PmBacktestTailSweepGapCommand extends Command
 
             // 2) 产生信号：本轮价差达标则在下一轮（i+1）下注，且 A/B 交替
             $signalTriggered = bccomp($priceDiffAbs, $minPredictDiff, 8) !== -1;
+            $signalDirection = $actualDirection;
+            if (!$signalTriggered && $fallbackLastDiff && $mode === '1') {
+                for ($back = $i - 1; $back >= 1; $back--) {
+                    $backPrevOpen = (string) $rows[$back - 1]->round_open_price;
+                    $backCurrentOpen = (string) $rows[$back]->round_open_price;
+                    if (!$this->isPositiveDecimal($backPrevOpen) || !$this->isPositiveDecimal($backCurrentOpen)) {
+                        continue;
+                    }
+
+                    $backDiffAbs = $this->bcAbs($this->bcSub($backCurrentOpen, $backPrevOpen, 8));
+                    if (bccomp($backDiffAbs, $minPredictDiff, 8) !== -1) {
+                        $signalTriggered = true;
+                        $signalDirection = bccomp($backCurrentOpen, $backPrevOpen, 8) === 1 ? 'up' : 'down';
+                        break;
+                    }
+                }
+            }
             $nextPrediction = null;
             if ($signalTriggered) {
                 if ($mode === '3') {
                     if ($prediction === null) {
                         $nextPrediction = $randomPredict
                             ? (random_int(0, 1) === 1 ? 'up' : 'down')
-                            : $actualDirection;
+                            : $signalDirection;
                     } elseif ($result === 'lose' && $betLine !== null && (($lineLoseStreak[$betLine] ?? 0) >= 2)) {
                         $nextPrediction = $actualDirection;
                     } else {
@@ -238,7 +257,7 @@ class PmBacktestTailSweepGapCommand extends Command
                 } else {
                     $nextPrediction = $randomPredict
                         ? (random_int(0, 1) === 1 ? 'up' : 'down')
-                        : $actualDirection;
+                        : $signalDirection;
                 }
             }
             $targetIndex = $i + 1;
@@ -288,6 +307,7 @@ class PmBacktestTailSweepGapCommand extends Command
                     'funding_need' => $currentFundingNeed,
                     'reset_lose_count' => (string) $resetLoseCount,
                     'signal' => $nextPrediction ?? 'skip',
+                    'signal_direction' => $signalTriggered ? $signalDirection : 'skip',
                     'predict_mode' => $randomPredict ? 'random' : 'trend',
                     'scheduled_line' => $scheduledLine ?? 'skip',
                     'scheduled_bet' => $scheduledLine !== null ? $scheduledBetAmount : '0',
