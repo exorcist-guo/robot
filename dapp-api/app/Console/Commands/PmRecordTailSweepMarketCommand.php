@@ -2,10 +2,7 @@
 
 namespace App\Console\Commands;
 
-use App\Models\Pm\PmTailSweepMarketSnapshot;
 use App\Models\Pm\PmTailSweepRoundOpenPrice;
-use App\Services\Pm\GammaClient;
-use App\Services\Pm\PolymarketTradingService;
 use App\Services\Pm\TailSweepMarketDataService;
 use App\Services\Pm\TailSweepPriceCache;
 use Illuminate\Console\Command;
@@ -16,21 +13,13 @@ use Illuminate\Support\Facades\Cache;
 
 class PmRecordTailSweepMarketCommand extends Command
 {
-    private const BASE_MARKET_SLUGS = [
-        'btc-updown-5m',
-        'btc-updown-15m',
-    ];
-
     protected $signature = 'pm:record-tail-sweep-market
         {--once : 仅执行一次采样，便于调试}
-        {--symbol=btc/usd : 默认标的}
-        {--target_usdc=20 : 固定下单金额，单位 USDC}';
+        {--symbol=btc/usd : 默认标的}';
 
-    protected $description = '每秒记录 BTC 当前价格、5m/15m 上涨下单价、下跌下单价和当前 5 分钟开盘价';
+    protected $description = '每秒记录 BTC 当前 5 分钟开盘价';
     public function handle(
-        GammaClient $gammaClient,
         TailSweepPriceCache $priceCache,
-        PolymarketTradingService $trading,
         TailSweepMarketDataService $marketData
     ): int {
         $once = (bool) $this->option('once');
@@ -68,7 +57,7 @@ class PmRecordTailSweepMarketCommand extends Command
             do {
                 try {
                     $this->reconnectRedis();
-                    $this->recordSnapshot($gammaClient, $priceCache, $trading, $marketData);
+                    $this->recordSnapshot($priceCache, $marketData);
 
                     if ($once) {
                         $this->info('行情记录完成');
@@ -96,100 +85,20 @@ class PmRecordTailSweepMarketCommand extends Command
     }
 
     private function recordSnapshot(
-        GammaClient $gammaClient,
         TailSweepPriceCache $priceCache,
-        PolymarketTradingService $trading,
         TailSweepMarketDataService $marketData
     ): void {
         $now = now();
-        $snapshotAt = Carbon::createFromTimestamp($now->timestamp);
         $defaultSymbol = $priceCache->normalizeSymbol((string) $this->option('symbol'));
         $roundStart = Carbon::createFromTimestamp($marketData->getRoundStartTime($now));
         $roundEnd = Carbon::createFromTimestamp($marketData->getRoundEndTime($now));
-        $targetUsdc = $this->resolveTargetUsdc();
-        $priceSnapshot = $priceCache->getSnapshot($defaultSymbol);
-
-        if (!$priceCache->isFresh($priceSnapshot)) {
-            $this->warn("标的 {$defaultSymbol} 缓存行情缺失或已过期，跳过本轮");
-
-            return;
-        }
-
-        $currentPrice = trim((string) ($priceSnapshot['value'] ?? '0'));
-        if (!preg_match('/^\d+(\.\d+)?$/', $currentPrice) || bccomp($currentPrice, '0', 8) <= 0) {
-            $this->warn("标的 {$defaultSymbol} 当前价格无效，跳过本轮");
-
-            return;
-        }
-
         $roundOpenPrice = $this->normalizeNullableDecimal($marketData->getStartPrice($roundStart->timestamp, $roundEnd->timestamp, $defaultSymbol));
-        $snapshotPayload = [
-            'current_price' => $currentPrice,
-            'up_entry_price5m' => null,
-            'down_entry_price5m' => null,
-            'up_entry_price15m' => null,
-            'down_entry_price15m' => null,
-            'target_usdc' => (int) $targetUsdc,
-        ];
 
-        foreach (self::BASE_MARKET_SLUGS as $baseSlug) {
-            $currentRoundSlug = $marketData->buildCurrentRoundSlug($baseSlug, $now);
+        if ($roundOpenPrice === null) {
+            $this->warn("标的 {$defaultSymbol} 当前轮开盘价缺失，跳过本轮");
 
-            try {
-                $market = $marketData->resolveCurrentRoundMarket($gammaClient, $currentRoundSlug);
-            } catch (\Throwable $e) {
-                $this->warn("{$baseSlug} 当前轮 market 解析失败，跳过: {$e->getMessage()}");
-                continue;
-            }
-
-            $books = [];
-            $upEntryPrice = null;
-            $downEntryPrice = null;
-            $tokenYesId = (string) ($market['token_yes_id'] ?? '');
-            $tokenNoId = (string) ($market['token_no_id'] ?? '');
-
-            if ($tokenYesId !== '' && $trading->isTokenTradable($tokenYesId)) {
-                [$upEntryPrice] = $marketData->resolveEntryPrice(
-                    $trading,
-                    $tokenYesId,
-                    PolymarketTradingService::SIDE_BUY,
-                    $targetUsdc,
-                    $books
-                );
-                $upEntryPrice = $this->normalizeNullableDecimal($upEntryPrice);
-            }
-
-            if ($tokenNoId !== '' && $trading->isTokenTradable($tokenNoId)) {
-                [$downEntryPrice] = $marketData->resolveEntryPrice(
-                    $trading,
-                    $tokenNoId,
-                    PolymarketTradingService::SIDE_BUY,
-                    $targetUsdc,
-                    $books
-                );
-                $downEntryPrice = $this->normalizeNullableDecimal($downEntryPrice);
-            }
-
-            if ($baseSlug === 'btc-updown-5m') {
-                $snapshotPayload['up_entry_price5m'] = $upEntryPrice;
-                $snapshotPayload['down_entry_price5m'] = $downEntryPrice;
-            }
-
-            if ($baseSlug === 'btc-updown-15m') {
-                $snapshotPayload['up_entry_price15m'] = $upEntryPrice;
-                $snapshotPayload['down_entry_price15m'] = $downEntryPrice;
-            }
-
-            // $this->info("行情已聚合: {$baseSlug} {$defaultSymbol} price={$currentPrice} up={$upEntryPrice} down={$downEntryPrice} open={$roundOpenPrice}");
+            return;
         }
-
-        PmTailSweepMarketSnapshot::query()->updateOrCreate(
-            [
-                'symbol' => $defaultSymbol,
-                'snapshot_at' => $snapshotAt,
-            ],
-            $snapshotPayload
-        );
 
         PmTailSweepRoundOpenPrice::query()->updateOrCreate(
             [
@@ -203,15 +112,6 @@ class PmRecordTailSweepMarketCommand extends Command
         );
     }
 
-    private function resolveTargetUsdc(): string
-    {
-        $target = trim((string) $this->option('target_usdc'));
-        if (!preg_match('/^\d+(\.\d+)?$/', $target) || bccomp($target, '0', 6) <= 0) {
-            $target = '20';
-        }
-
-        return bcmul($target, '1000000', 0);
-    }
 
     private function normalizeNullableDecimal(?string $value): ?string
     {
