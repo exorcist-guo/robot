@@ -85,13 +85,11 @@ class PmClaimPositionCommand extends Command
         foreach ($positions as $index => $pos) {
             $currentValue = (float) ($pos['currentValue'] ?? 0);
             $isRedeemable = (bool) ($pos['redeemable'] ?? false);
-            $hasChainBalance = $this->hasChainTokenBalance($wallet, (string) ($pos['asset'] ?? ''));
             $canRedeemLosing = $includeLosing
-                && $currentValue > 0
-                && $isRedeemable
-                && $hasChainBalance;
-            $isClaimable = $currentValue > 0 && $isRedeemable && $hasChainBalance;
-            $isLaggingRedeemed = $currentValue > 0 && $isRedeemable && !$hasChainBalance;
+                && $currentValue <= 0
+                && $isRedeemable;
+            $isClaimable = ($currentValue > 0 || $canRedeemLosing) && $isRedeemable;
+            $isLaggingRedeemed = false;
 
             if ($isClaimable) {
                 $claimablePositions[] = $pos;
@@ -197,7 +195,10 @@ class PmClaimPositionCommand extends Command
             $groupIndex++;
             $primaryPosition = $positionsGroup[0];
             $totalCurrentValue = array_sum(array_map(static fn (array $pos) => (float) ($pos['currentValue'] ?? 0), $positionsGroup));
-            if ($totalCurrentValue <= 0) {
+            $hasRedeemableBalance = collect($positionsGroup)->contains(function (array $pos) use ($wallet) {
+                return (bool) ($pos['redeemable'] ?? false) && $this->hasChainTokenBalance($wallet, (string) ($pos['asset'] ?? ''));
+            });
+            if ($totalCurrentValue <= 0 && !$hasRedeemableBalance) {
                 $failCount++;
                 $this->warn("[{$groupIndex}/{$totalCount}] 跳过领取: 当前可领取金额为 $0.00");
                 $this->line("Condition ID: " . ($primaryPosition['conditionId'] ?? 'N/A'));
@@ -273,7 +274,10 @@ class PmClaimPositionCommand extends Command
     {
         $position = $positions[0] ?? [];
         $totalCurrentValue = array_sum(array_map(static fn (array $pos) => (float) ($pos['currentValue'] ?? 0), $positions));
-        if ($totalCurrentValue <= 0) {
+        $hasRedeemableBalance = collect($positions)->contains(function (array $pos) {
+            return (bool) ($pos['redeemable'] ?? false) && ((float) ($pos['size'] ?? 0) > 0);
+        });
+        if ($totalCurrentValue <= 0 && !$hasRedeemableBalance) {
             return [
                 'success' => false,
                 'error' => 'nothing_to_claim',
@@ -292,7 +296,7 @@ class PmClaimPositionCommand extends Command
 
         // 2. 准备参数
         $conditionId = strtolower($position['conditionId'] ?? '');
-        $collateralToken = (string) config('pm.legacy_collateral_token', config('pm.claim_collateral_token', config('pm.collateral_token')));
+        $collateralToken = (string) config('pm.claim_collateral_token', config('pm.collateral_token', config('pm.legacy_collateral_token')));
         $ctfContract = config('pm.ctf_contract');
         $negRiskAdapterContract = config('pm.neg_risk_adapter_contract');
         $parentCollectionId = '0x0000000000000000000000000000000000000000000000000000000000000000';
@@ -463,11 +467,12 @@ class PmClaimPositionCommand extends Command
         return $selector . $head . $tail;
     }
 
-    private function encodeNegRiskRedeemCalldata(array $position): string
+    private function encodeNegRiskRedeemCalldata(array $positions): string
     {
         $selector = '0xdbeccb23'; // redeemPositions(bytes32,uint256[])
-        $conditionId = strtolower((string) ($position['conditionId'] ?? ''));
-        $amounts = $this->resolveNegRiskRedeemAmounts($position);
+        $primary = $positions[0] ?? [];
+        $conditionId = strtolower((string) ($primary['conditionId'] ?? ''));
+        $amounts = $this->resolveNegRiskRedeemAmounts($positions);
 
         $head = '';
         $head .= $this->encodeBytes32($conditionId);
@@ -481,17 +486,35 @@ class PmClaimPositionCommand extends Command
         return $selector . $head . $tail;
     }
 
-    private function resolveNegRiskRedeemAmounts(array $position): array
+    private function resolveNegRiskRedeemAmounts(array $positions): array
     {
-        $size = (string) ($position['size'] ?? '0');
-        $scaledAmount = $this->decimalToTokenUnits($size);
-        $outcomeIndex = Arr::get($position, 'outcomeIndex');
+        $amounts = ['0', '0'];
 
-        if (is_numeric($outcomeIndex) && (int) $outcomeIndex === 1) {
-            return ['0', $scaledAmount];
+        foreach ($positions as $position) {
+            if (!is_array($position)) {
+                continue;
+            }
+
+            $size = (string) ($position['size'] ?? '0');
+            $scaledAmount = $this->decimalToTokenUnits($size);
+            if (bccomp($scaledAmount, '0', 0) <= 0) {
+                continue;
+            }
+
+            $outcomeIndex = Arr::get($position, 'outcomeIndex');
+            if (!is_numeric($outcomeIndex)) {
+                continue;
+            }
+
+            $index = (int) $outcomeIndex;
+            if ($index < 0 || $index > 1) {
+                continue;
+            }
+
+            $amounts[$index] = bcadd($amounts[$index], $scaledAmount, 0);
         }
 
-        return [$scaledAmount, '0'];
+        return $amounts;
     }
 
     private function decimalToTokenUnits(string $amount): string
@@ -685,6 +708,7 @@ class PmClaimPositionCommand extends Command
     {
         $minAge = (int) $this->option('min-age');
         $dryRun = $this->option('dry-run');
+        $includeLosing = (bool) $this->option('include-losing');
         $now = time();
         $cutoffTime = $now - $minAge;
 
@@ -692,6 +716,7 @@ class PmClaimPositionCommand extends Command
         $this->line("最小订单年龄: " . ($minAge / 3600) . " 小时");
         $this->line("截止时间: " . date('Y-m-d H:i:s', $cutoffTime));
         $this->line("Dry Run: " . ($dryRun ? '是' : '否'));
+        $this->line("Include Losing: " . ($includeLosing ? '是' : '否'));
         $this->newLine();
 
         // 1. 获取所有钱包
@@ -748,13 +773,9 @@ class PmClaimPositionCommand extends Command
                 foreach ($positions as $pos) {
                     $currentValue = (float) ($pos['currentValue'] ?? 0);
                     $isRedeemable = (bool) ($pos['redeemable'] ?? false);
-                    $hasChainBalance = $this->hasChainTokenBalance($wallet, (string) ($pos['asset'] ?? ''));
-
-                    // 已兑换但接口未刷新
-                    if ($currentValue > 0 && $isRedeemable && !$hasChainBalance) {
-                        $this->line("  ☑️ 已兑换(接口延迟): " . ($pos['title'] ?? 'Unknown') . " - $" . number_format($currentValue, 2));
-                        continue;
-                    }
+                    $canRedeemLosing = $includeLosing
+                        && $currentValue <= 0
+                        && $isRedeemable;
 
                     // 从 slug 中提取时间戳
                     $slug = $pos['slug'] ?? '';
@@ -762,11 +783,12 @@ class PmClaimPositionCommand extends Command
                         $orderTime = (int) $matches[1];
                         $age = $now - $orderTime;
 
-                        // 只处理超过最小年龄、且接口可领、且链上仍有 token 余额的持仓
-                        if ($age >= $minAge && $currentValue > 0 && $isRedeemable && $hasChainBalance) {
+                        if ($age >= $minAge && (($currentValue > 0) || $canRedeemLosing) && $isRedeemable) {
                             $claimablePositions[] = $pos;
                             $totalValue += max($currentValue, 0);
-                            $this->line("  ✅ 可领取: " . ($pos['title'] ?? 'Unknown') . " - $" . number_format($currentValue, 2) . " (订单时间: " . date('Y-m-d H:i:s', $orderTime) . ", 年龄: " . round($age / 3600, 1) . "h)");
+                            $label = $canRedeemLosing ? '♻️ 可兑换(已输)' : '✅ 可领取';
+                            $displayValue = $canRedeemLosing ? 0 : $currentValue;
+                            $this->line("  {$label}: " . ($pos['title'] ?? 'Unknown') . " - $" . number_format($displayValue, 2) . " (订单时间: " . date('Y-m-d H:i:s', $orderTime) . ", 年龄: " . round($age / 3600, 1) . "h)");
                         } else {
                             $this->line("  ⏳ 太新: " . ($pos['title'] ?? 'Unknown') . " - $" . number_format($currentValue, 2) . " (订单时间: " . date('Y-m-d H:i:s', $orderTime) . ", 年龄: " . round($age / 3600, 1) . "h)");
                         }
@@ -782,9 +804,32 @@ class PmClaimPositionCommand extends Command
                     continue;
                 }
 
-                $totalClaimable += count($claimablePositions);
+                $groupedPositions = [];
+                foreach ($claimablePositions as $position) {
+                    $groupKey = strtolower((string) ($position['conditionId'] ?? ''));
+                    if ($groupKey === '') {
+                        $groupKey = 'position_' . count($groupedPositions);
+                    }
+                    if (isset($groupedPositions[$groupKey])) {
+                        continue;
+                    }
+
+                    $positionsGroup = array_values(array_filter($positions, function (array $candidate) use ($groupKey, $includeLosing) {
+                        $currentValue = (float) ($candidate['currentValue'] ?? 0);
+                        $isRedeemable = (bool) ($candidate['redeemable'] ?? false);
+                        $canRedeemLosing = $includeLosing && $currentValue <= 0 && $isRedeemable;
+
+                        return strtolower((string) ($candidate['conditionId'] ?? '')) === $groupKey
+                            && $isRedeemable
+                            && ($currentValue > 0 || $canRedeemLosing);
+                    }));
+
+                    $groupedPositions[$groupKey] = $positionsGroup !== [] ? $positionsGroup : [$position];
+                }
+
+                $totalClaimable += count($groupedPositions);
                 $this->newLine();
-                $this->info("符合条件的可领取持仓: " . count($claimablePositions) . " 个");
+                $this->info("符合条件的可领取持仓: " . count($groupedPositions) . " 个");
 
                 // Dry run 模式，不执行领取
                 if ($dryRun) {
@@ -794,11 +839,14 @@ class PmClaimPositionCommand extends Command
 
                 // 执行领取
                 $this->newLine();
-                foreach ($claimablePositions as $index => $position) {
-                    $this->line("[" . ($index + 1) . "/" . count($claimablePositions) . "] 领取: " . ($position['title'] ?? 'Unknown') . " - $" . number_format($position['currentValue'], 2));
+                $groups = array_values($groupedPositions);
+                foreach ($groups as $index => $positionsGroup) {
+                    $primary = $positionsGroup[0] ?? [];
+                    $groupValue = array_sum(array_map(static fn (array $pos) => (float) ($pos['currentValue'] ?? 0), $positionsGroup));
+                    $this->line("[" . ($index + 1) . "/" . count($groups) . "] 领取: " . ($primary['title'] ?? 'Unknown') . " - $" . number_format($groupValue, 2));
 
                     try {
-                        $result = $this->claimPosition($wallet, $position, $resolver, $rpcService);
+                        $result = $this->claimPosition($wallet, $positionsGroup, $resolver, $rpcService);
 
                         if ($result['success']) {
                             $totalClaimed++;
@@ -813,7 +861,7 @@ class PmClaimPositionCommand extends Command
                     }
 
                     // 等待 3 秒
-                    if ($index < count($claimablePositions) - 1) {
+                    if ($index < count($groups) - 1) {
                         sleep(3);
                     }
                 }
