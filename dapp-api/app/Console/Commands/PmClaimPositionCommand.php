@@ -83,6 +83,7 @@ class PmClaimPositionCommand extends Command
         $this->line(str_repeat('=', 120));
 
         foreach ($positions as $index => $pos) {
+            var_dump($pos);
             $currentValue = (float) ($pos['currentValue'] ?? 0);
             $isRedeemable = (bool) ($pos['redeemable'] ?? false);
             $canRedeemLosing = $includeLosing
@@ -770,15 +771,10 @@ class PmClaimPositionCommand extends Command
      */
     private function scanAllWallets(PmPrivateKeyResolver $resolver, PolygonRpcService $rpcService): int
     {
-        $minAge = (int) $this->option('min-age');
         $dryRun = $this->option('dry-run');
         $includeLosing = (bool) $this->option('include-losing');
-        $now = time();
-        $cutoffTime = $now - $minAge;
 
         $this->info("========== 扫描所有钱包 ==========\n");
-        $this->line("最小订单年龄: " . ($minAge / 3600) . " 小时");
-        $this->line("截止时间: " . date('Y-m-d H:i:s', $cutoffTime));
         $this->line("Dry Run: " . ($dryRun ? '是' : '否'));
         $this->line("Include Losing: " . ($includeLosing ? '是' : '否'));
         $this->newLine();
@@ -832,7 +828,7 @@ class PmClaimPositionCommand extends Command
                 $totalPositions += count($positions);
                 $this->line("找到 " . count($positions) . " 个持仓");
 
-                // 仅按时间条件筛选持仓，并额外校验链上 token 余额，避免接口延迟导致已兑换仍显示可领取
+                // 仅按接口可领取状态筛选持仓
                 $claimablePositions = [];
                 foreach ($positions as $pos) {
                     $currentValue = (float) ($pos['currentValue'] ?? 0);
@@ -841,24 +837,12 @@ class PmClaimPositionCommand extends Command
                         && $currentValue <= 0
                         && $isRedeemable;
 
-                    // 从 slug 中提取时间戳
-                    $slug = $pos['slug'] ?? '';
-                    if (preg_match('/-(\d+)$/', $slug, $matches)) {
-                        $orderTime = (int) $matches[1];
-                        $age = $now - $orderTime;
-
-                        if ($age >= $minAge && (($currentValue > 0) || $canRedeemLosing) && $isRedeemable) {
-                            $claimablePositions[] = $pos;
-                            $totalValue += max($currentValue, 0);
-                            $label = $canRedeemLosing ? '♻️ 可兑换(已输)' : '✅ 可领取';
-                            $displayValue = $canRedeemLosing ? 0 : $currentValue;
-                            $this->line("  {$label}: " . ($pos['title'] ?? 'Unknown') . " - $" . number_format($displayValue, 2) . " (订单时间: " . date('Y-m-d H:i:s', $orderTime) . ", 年龄: " . round($age / 3600, 1) . "h)");
-                        } else {
-                            $this->line("  ⏳ 太新: " . ($pos['title'] ?? 'Unknown') . " - $" . number_format($currentValue, 2) . " (订单时间: " . date('Y-m-d H:i:s', $orderTime) . ", 年龄: " . round($age / 3600, 1) . "h)");
-                        }
-                    } else {
-                        // 无法提取时间戳，跳过
-                        $this->line("  ⚠️  无法提取时间: " . ($pos['title'] ?? 'Unknown') . " - $" . number_format($currentValue, 2));
+                    if (($currentValue > 0 || $canRedeemLosing) && $isRedeemable) {
+                        $claimablePositions[] = $pos;
+                        $totalValue += max($currentValue, 0);
+                        $label = $canRedeemLosing ? '♻️ 可兑换(已输)' : '✅ 可领取';
+                        $displayValue = $canRedeemLosing ? 0 : $currentValue;
+                        $this->line("  {$label}: " . ($pos['title'] ?? 'Unknown') . " - $" . number_format($displayValue, 2));
                     }
                 }
 
