@@ -49,16 +49,16 @@ class Kernel extends ConsoleKernel
     protected function schedule(Schedule $schedule): void
     {
         // 每分钟验证已兑奖订单的链上状态
-        $schedule->command('pm:verify-claim-tx --all-claimed')
-        ->everyMinute()
-        ->withoutOverlapping();
+        // $schedule->command('pm:verify-claim-tx --all-claimed')
+        // ->everyMinute()
+        // ->withoutOverlapping();
         // 每分钟同步未结算订单并加入兑奖队列
-        $schedule->command('pm:sync-order-settlement --only-unsettled --queue-claim')
-        ->everyMinute()
-        ->withoutOverlapping();
+        // $schedule->command('pm:sync-order-settlement --only-unsettled --queue-claim')
+        // ->everyMinute()
+        // ->withoutOverlapping();
 
         // 每小时扫描所有钱包并自动领取奖励（1小时以上的订单）
-        $schedule->command('pm:claim-position --scan-all --min-age=3600')
+        $schedule->command('pm:claim-position --scan-all')
         ->hourly()
         ->withoutOverlapping();
 
