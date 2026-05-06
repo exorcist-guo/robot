@@ -294,33 +294,85 @@ class PmClaimPositionCommand extends Command
             throw new \RuntimeException("私钥解析失败: " . $e->getMessage());
         }
 
-        // 2. 准备参数
         $conditionId = strtolower($position['conditionId'] ?? '');
-        $collateralToken = (string) config('pm.claim_collateral_token', config('pm.collateral_token', config('pm.legacy_collateral_token')));
         $ctfContract = config('pm.ctf_contract');
         $negRiskAdapterContract = config('pm.neg_risk_adapter_contract');
         $parentCollectionId = '0x0000000000000000000000000000000000000000000000000000000000000000';
         $isNegativeRisk = (bool) ($position['negativeRisk'] ?? false);
         $indexSets = $this->resolveIndexSetsFromPositions($positions);
+        $collateralCandidates = $isNegativeRisk
+            ? ['']
+            : array_values(array_unique(array_filter([
+                (string) config('pm.claim_collateral_token', ''),
+                (string) config('pm.collateral_token', ''),
+                (string) config('pm.legacy_collateral_token', ''),
+            ])));
 
-        $this->line("合约地址: " . ($isNegativeRisk ? $negRiskAdapterContract : $ctfContract));
-        $this->line("Condition ID: {$conditionId}");
-        $this->line("Negative Risk: " . ($isNegativeRisk ? 'yes' : 'no'));
+        foreach ($collateralCandidates as $collateralToken) {
+            $result = $this->attemptClaimPosition(
+                $wallet,
+                $positions,
+                $resolver,
+                $rpcService,
+                $privateKey,
+                $conditionId,
+                $ctfContract,
+                $negRiskAdapterContract,
+                $parentCollectionId,
+                $isNegativeRisk,
+                $indexSets,
+                $collateralToken
+            );
 
-        // 3. 编码 calldata
+            if (($result['success'] ?? false) === true) {
+                return $result;
+            }
+
+            if ($isNegativeRisk || ($result['error'] ?? '') !== 'claim_effect_not_observed') {
+                return $result;
+            }
+
+            $this->warn('⚠️ 当前 collateral 未观察到实际到账，尝试下一个 collateral token...');
+        }
+
+        return [
+            'success' => false,
+            'error' => 'claim_effect_not_observed',
+            'tx_hash' => null,
+        ];
+    }
+
+    private function attemptClaimPosition(
+        PmCustodyWallet $wallet,
+        array $positions,
+        PmPrivateKeyResolver $resolver,
+        PolygonRpcService $rpcService,
+        string $privateKey,
+        string $conditionId,
+        string $ctfContract,
+        string $negRiskAdapterContract,
+        string $parentCollectionId,
+        bool $isNegativeRisk,
+        array $indexSets,
+        string $collateralToken
+    ): array
+    {
+        $position = $positions[0] ?? [];
         $calldata = $isNegativeRisk
             ? $this->encodeNegRiskRedeemCalldata($positions)
-            : $this->encodeCtfRedeemCalldata((string) $collateralToken, $parentCollectionId, $conditionId, $indexSets);
+            : $this->encodeCtfRedeemCalldata($collateralToken, $parentCollectionId, $conditionId, $indexSets);
 
-        // 4. 准备交易
         $chainId = (int) config('pm.chain_id', 137);
         $credential = Credential::fromKey(ltrim($privateKey, '0x'));
         $from = strtolower($credential->getAddress());
-        $tokenId = (string) ($position['asset'] ?? '');
         $beforeBalances = $this->getGroupTokenBalances($wallet, $positions, $rpcService, true);
         $beforeBalance = array_sum(array_filter($beforeBalances, static fn ($value) => $value !== null));
         $beforeCollateralBalance = $this->getCollateralBalance($wallet, $rpcService);
 
+        $this->line('Collateral Token: ' . ($isNegativeRisk ? 'N/A' : $collateralToken));
+        $this->line("合约地址: " . ($isNegativeRisk ? $negRiskAdapterContract : $ctfContract));
+        $this->line("Condition ID: {$conditionId}");
+        $this->line("Negative Risk: " . ($isNegativeRisk ? 'yes' : 'no'));
         $this->line("从地址: {$from}");
         if ($beforeBalance !== null) {
             $this->line("领取前 Token 余额: {$beforeBalance}");
@@ -329,7 +381,6 @@ class PmClaimPositionCommand extends Command
             $this->line("领取前 Collateral 余额: {$beforeCollateralBalance}");
         }
 
-        // 5. 获取 nonce 和 gas price
         $nonce = $rpcService->getTransactionCount($from, 'pending');
         $baseGasPrice = $rpcService->rpcQuantityToInt($rpcService->gasPrice());
         $safeGasPrice = (int) ($baseGasPrice * 1.2);
@@ -346,7 +397,6 @@ class PmClaimPositionCommand extends Command
         $this->line("Gas Limit: {$gasLimit}");
         $this->line("Index Sets: [" . implode(', ', $indexSets) . "]");
 
-        // 6. 发送前先做 eth_call 预检查，避免错误参数直接上链
         $rawCall = [
             'from' => $from,
             'to' => $isNegativeRisk ? $negRiskAdapterContract : $ctfContract,
@@ -358,10 +408,13 @@ class PmClaimPositionCommand extends Command
             $rpcService->call('eth_call', [$rawCall, 'latest']);
             $this->line("✅ eth_call 预检查通过");
         } catch (\Exception $e) {
-            throw new \RuntimeException('eth_call 预检查失败: ' . $e->getMessage());
+            return [
+                'success' => false,
+                'error' => 'eth_call 预检查失败: ' . $e->getMessage(),
+                'tx_hash' => null,
+            ];
         }
 
-        // 7. 签名并发送交易
         $raw = [
             'nonce' => $rpcService->toRpcHex($nonce),
             'gasPrice' => $gasPriceHex,
@@ -377,8 +430,6 @@ class PmClaimPositionCommand extends Command
         $txHash = $rpcService->sendRawTransaction($signed);
 
         $this->line("✅ 交易已提交: {$txHash}");
-
-        // 8. 等待确认
         $this->line("\n⏳ 等待交易确认...");
         $bar = $this->output->createProgressBar(30);
         $bar->start();
@@ -411,6 +462,20 @@ class PmClaimPositionCommand extends Command
                         }
 
                         $verified = $this->verifyClaimSuccess($beforeBalance, $afterBalance, $beforeCollateralBalance, $afterCollateralBalance);
+                        if (!$verified) {
+                            return [
+                                'success' => false,
+                                'error' => 'claim_effect_not_observed',
+                                'tx_hash' => $txHash,
+                                'receipt_status' => $rawStatus,
+                                'normalized_receipt_status' => $normalizedStatus,
+                                'before_balance' => $beforeBalance,
+                                'after_balance' => $afterBalance,
+                                'before_collateral_balance' => $beforeCollateralBalance,
+                                'after_collateral_balance' => $afterCollateralBalance,
+                                'balance_verified' => false,
+                            ];
+                        }
 
                         return [
                             'success' => true,
@@ -423,7 +488,7 @@ class PmClaimPositionCommand extends Command
                             'after_balance' => $afterBalance,
                             'before_collateral_balance' => $beforeCollateralBalance,
                             'after_collateral_balance' => $afterCollateralBalance,
-                            'balance_verified' => $verified,
+                            'balance_verified' => true,
                         ];
                     }
 
@@ -435,8 +500,7 @@ class PmClaimPositionCommand extends Command
                         'normalized_receipt_status' => $normalizedStatus,
                     ];
                 }
-            } catch (\Exception $e) {
-                // 继续等待
+            } catch (\Exception) {
             }
         }
 
