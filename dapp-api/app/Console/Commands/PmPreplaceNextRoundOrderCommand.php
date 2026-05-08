@@ -125,10 +125,13 @@ class PmPreplaceNextRoundOrderCommand extends Command
                 $existingOrder = PmSkipRoundOrder::query()
                     ->where('strategy_id', $strategy->id)
                     ->where('target_round_key', (string) $prediction['target_round_key'])
-                    ->whereIn('status', PmSkipRoundOrder::ACTIVE_STATUSES)
                     ->first();
                 if ($existingOrder) {
-                    $this->line(($config['strategy_key'] ?? 'skip-round')." 当前轮已存在活跃订单: {$existingOrder->id}");
+                    if (in_array((string) $existingOrder->status, PmSkipRoundOrder::ACTIVE_STATUSES, true)) {
+                        $this->line(($config['strategy_key'] ?? 'skip-round')." 当前轮已存在活跃订单: {$existingOrder->id}");
+                    } else {
+                        $this->line(($config['strategy_key'] ?? 'skip-round')." 当前轮已存在历史订单，跳过重复创建: {$existingOrder->id} [{$existingOrder->status}]");
+                    }
                     return self::SUCCESS;
                 }
 
@@ -145,10 +148,10 @@ class PmPreplaceNextRoundOrderCommand extends Command
                     'token_id' => $tokenId,
                     'predicted_side' => $predictedSide,
                     'order_side' => 'BUY',
-                    'predict_diff' => (string) $prediction['predict_diff'],
-                    'predict_abs_diff' => (string) $prediction['predict_abs_diff'],
-                    'prev_round_open_price' => (string) $prediction['prev_round_open_price'],
-                    'current_round_open_price' => (string) $prediction['current_round_open_price'],
+                    'predict_diff' => (string) ($prediction['predict_diff'] ?? '0'),
+                    'predict_abs_diff' => (string) ($prediction['predict_abs_diff'] ?? '0'),
+                    'prev_round_open_price' => (string) ($prediction['prev_round_open_price'] ?? '0'),
+                    'current_round_open_price' => (string) ($prediction['current_round_open_price'] ?? '0'),
                     'bet_amount' => (string) $line->current_bet_amount,
                     'status' => PmSkipRoundOrder::STATUS_PREDICTED,
                     'snapshot' => [
@@ -192,14 +195,16 @@ class PmPreplaceNextRoundOrderCommand extends Command
                     $this->info(($config['strategy_key'] ?? 'skip-round')." 已创建并执行隔一轮订单: {$order->id}");
                     return self::SUCCESS;
                 } catch (\Throwable $e) {
-                    $order->refresh();
+                    $message = $e->getMessage();
                     $order->status = PmSkipRoundOrder::STATUS_FAILED;
-                    $order->fail_reason = str_contains(strtolower($e->getMessage()), 'timed out')
+                    $order->fail_reason = str_contains(strtolower($message), 'timed out')
                         ? 'clob_connect_timeout'
-                        : 'execution_exception';
+                        : (str_contains(strtolower($message), 'not enough balance / allowance')
+                            ? 'insufficient_balance_or_allowance'
+                            : 'execution_exception');
                     $order->snapshot = array_merge($order->snapshot ?? [], [
                         'execution_exception' => [
-                            'message' => $e->getMessage(),
+                            'message' => $message,
                             'class' => $e::class,
                         ],
                     ]);
@@ -209,8 +214,8 @@ class PmPreplaceNextRoundOrderCommand extends Command
                     $strategy->last_ran_at = now();
                     $strategy->save();
 
-                    $this->error(($config['strategy_key'] ?? 'skip-round').' 执行失败: '.$e->getMessage());
-                    return self::FAILURE;
+                    $this->error(($config['strategy_key'] ?? 'skip-round').' 执行失败: '.$message);
+
                 }
             }
 

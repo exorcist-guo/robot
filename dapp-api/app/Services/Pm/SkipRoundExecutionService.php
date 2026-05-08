@@ -209,7 +209,25 @@ class SkipRoundExecutionService
             return;
         }
 
-        $remote = $this->trading->getUserOrder($wallet, (string) $order->remote_order_id);
+        try {
+            $remote = $this->trading->getUserOrder($wallet, (string) $order->remote_order_id);
+        } catch (\Throwable $e) {
+            $message = strtolower($e->getMessage());
+            if (str_contains($message, 'json response is not an array') || str_contains($message, 'response body: null')) {
+                $order->snapshot = array_merge($order->snapshot ?? [], [
+                    'last_remote_order_error' => [
+                        'message' => $e->getMessage(),
+                        'class' => $e::class,
+                        'at' => now()->toDateTimeString(),
+                    ],
+                ]);
+                $order->save();
+                return;
+            }
+
+            throw $e;
+        }
+
         $matchedSize = (string) ($remote['size_matched'] ?? $remote['filled_size'] ?? $remote['matched_size'] ?? $remote['sizeMatched'] ?? '0');
         $matchedNotional = (string) ($remote['takingAmount'] ?? $remote['filledAmount'] ?? $remote['filled_amount'] ?? '0');
         if (($matchedNotional === '' || $matchedNotional === '0') && preg_match('/^\d+(\.\d+)?$/', (string) $order->limit_price) === 1 && preg_match('/^\d+(\.\d+)?$/', $matchedSize) === 1) {
