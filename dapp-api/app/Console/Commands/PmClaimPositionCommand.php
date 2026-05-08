@@ -83,7 +83,6 @@ class PmClaimPositionCommand extends Command
         $this->line(str_repeat('=', 120));
 
         foreach ($positions as $index => $pos) {
-            var_dump($pos);
             $currentValue = (float) ($pos['currentValue'] ?? 0);
             $isRedeemable = (bool) ($pos['redeemable'] ?? false);
             $canRedeemLosing = $includeLosing

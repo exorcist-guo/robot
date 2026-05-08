@@ -16,7 +16,7 @@ class SkipRoundConfigProvider
             'market_slug' => 'btc-updown-5m',
             'resolution_source' => 'https://data.chain.link/streams/btc-usd',
             'symbol' => 'btc/usd',
-            'base_bet' => '5',
+            'base_bet' => '1',
             'max_lose_reset_limit' => 5,
             'min_predict_diff' => '1',
         ];
