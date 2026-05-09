@@ -89,10 +89,14 @@ class SkipRoundSettlementService
             // 有效下注金额优先取真实成交金额：
             // - matched_notional：限价单已成交部分
             // - market_buy_notional：撤单后补市价成交部分
-            // 如果两者都没有，则回退到原始 bet_amount。
+            // 如果两者都没有，则回退为“下单 size * limit_price”推导出的理论名义金额。
             $effectiveBet = bcadd((string) $order->matched_notional, (string) $order->market_buy_notional, 8);
             if (bccomp($effectiveBet, '0', 8) !== 1) {
-                $effectiveBet = (string) $order->bet_amount;
+                $fallbackSize = (string) ($order->limit_order_size ?: $order->bet_amount);
+                $fallbackPrice = (string) ($order->limit_price ?: '0');
+                $effectiveBet = preg_match('/^\d+(\.\d+)?$/', $fallbackSize) === 1 && preg_match('/^\d+(\.\d+)?$/', $fallbackPrice) === 1
+                    ? bcmul($fallbackSize, $fallbackPrice, 8)
+                    : '0';
             }
 
             // 当前实现的 pnl 口径比较直接：

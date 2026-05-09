@@ -29,7 +29,7 @@ class SkipRoundLineStateService
                 'market_slug' => (string) $config['market_slug'],
                 'resolution_source' => (string) ($config['resolution_source'] ?? ''),
                 'symbol' => (string) ($config['symbol'] ?? 'btc/usd'),
-                'base_bet_amount' => (string) $config['base_bet'],
+                'base_bet_amount' => (string) $config['base_size'],
                 'max_lose_reset_limit' => (int) $config['max_lose_reset_limit'],
                 'min_predict_diff' => (string) $config['min_predict_diff'],
                 'next_line' => 'A',
@@ -45,7 +45,7 @@ class SkipRoundLineStateService
         foreach (['A', 'B'] as $lineCode) {
             PmSkipRoundStrategyLine::firstOrCreate(
                 ['strategy_id' => $strategy->id, 'line_code' => $lineCode],
-                ['current_bet_amount' => (string) $config['base_bet']]
+                ['current_bet_amount' => (string) $config['base_size']]
             );
         }
 
@@ -71,16 +71,20 @@ class SkipRoundLineStateService
      * 根据订单结算结果，推进单条资金线状态。
      *
      * 规则：
-     * - win：当前线下注金额重置为 base_bet，连亏清零
-     * - lose：当前线下注金额翻倍，连亏 +1
+     * - win：当前线下注金额重置为 base_size，连亏清零
+     * - lose：当前线下注金额改为 base_size * loss_bet_multiplier，连亏 +1
      * - 若连亏达到 max_lose_reset_limit：金额重置，连亏清零，并把 last_result 记为 reset
      *
      * @param array<string,mixed> $config
      */
     public function settle(PmSkipRoundStrategyLine $line, PmSkipRoundStrategy $strategy, array $config, string $targetRoundKey, string $result, int $orderId): void
     {
-        $baseBet = (string) $config['base_bet'];
+        $baseSize = (string) $config['base_size'];
         $limit = (int) $config['max_lose_reset_limit'];
+        $lossBetMultiplier = trim((string) ($config['loss_bet_multiplier'] ?? '2'));
+        if ($lossBetMultiplier === '' || preg_match('/^\d+(\.\d+)?$/', $lossBetMultiplier) !== 1) {
+            $lossBetMultiplier = '2';
+        }
 
         // 先更新这条线的基础结算信息。
         $line->total_bet_count++;
@@ -93,10 +97,10 @@ class SkipRoundLineStateService
             // 赢了：
             // - 胜场数 +1
             // - 连亏清零
-            // - 下一次下注金额恢复到初始金额
+            // - 下一次下注金额恢复到初始 size
             $line->total_win_count++;
             $line->lose_streak_count = 0;
-            $line->current_bet_amount = $baseBet;
+            $line->current_bet_amount = $baseSize;
         } else {
             // 输了：
             // - 败场数 +1
@@ -109,11 +113,11 @@ class SkipRoundLineStateService
                 // - 金额恢复初始值
                 // - 连亏清零
                 $line->lose_streak_count = 0;
-                $line->current_bet_amount = $baseBet;
+                $line->current_bet_amount = $baseSize;
                 $line->last_result = 'reset';
             } else {
-                // 未达到重置上限：下一次下注金额翻倍。
-                $line->current_bet_amount = bcmul((string) $line->current_bet_amount, '2', 8);
+                // 未达到重置上限：下一次下注金额 = base_size * loss_bet_multiplier。
+                $line->current_bet_amount = bcmul($baseSize, $lossBetMultiplier, 8);
             }
         }
 

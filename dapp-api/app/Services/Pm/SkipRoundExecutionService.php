@@ -74,14 +74,46 @@ class SkipRoundExecutionService
             $limitPrice = '0.52';
         }
         $limitPrice = bcadd($limitPrice, '0', 2);
-        $limitOrderSize = bcdiv((string) $order->bet_amount, $limitPrice, 2);
+        $limitOrderSize = bcadd((string) $order->bet_amount, '0', 2);
+        $limitOrderNotional = bcmul($limitOrderSize, $limitPrice, 8);
+
+        $allowanceStatus = $this->trading->getAllowanceStatus($wallet);
+        if (($allowanceStatus['is_approved'] ?? false) !== true) {
+            $approval = $this->trading->approveCollateral($wallet);
+            $order->snapshot = array_merge($order->snapshot ?? [], [
+                'buy_allowance' => $allowanceStatus,
+                'auto_approve_collateral' => $approval,
+                'calculated_notional' => $limitOrderNotional,
+            ]);
+            $order->save();
+            return $order->fresh();
+        }
+
+        $readiness = $this->trading->getTradingReadiness(
+            $wallet,
+            PolymarketTradingService::SIDE_BUY,
+            (string) $order->token_id,
+            $limitPrice,
+            $limitOrderSize,
+        );
+        if (($readiness['is_ready'] ?? false) !== true) {
+            $failureCode = (string) ($readiness['failure_code'] ?? 'trade_not_ready');
+            $order->status = PmSkipRoundOrder::STATUS_FAILED;
+            $order->fail_reason = $failureCode;
+            $order->snapshot = array_merge($order->snapshot ?? [], [
+                'buy_allowance' => $allowanceStatus,
+                'buy_readiness' => $readiness,
+            ]);
+            $order->save();
+            return $order;
+        }
 
         $order->place_started_at = $order->place_started_at ?: now();
         $order->limit_price = $limitPrice;
         $order->limit_order_size = $limitOrderSize;
-        $order->limit_order_notional = (string) $order->bet_amount;
-        $order->remaining_notional = (string) $order->bet_amount;
-        $order->snapshot = array_merge($order->snapshot ?? [], ['initial_orderbook' => $book, 'selected_level' => $level]);
+        $order->limit_order_notional = $limitOrderNotional;
+        $order->remaining_notional = $limitOrderNotional;
+        $order->snapshot = array_merge($order->snapshot ?? [], ['initial_orderbook' => $book, 'selected_level' => $level, 'buy_readiness' => $readiness]);
         $order->save();
 
         $placed = $this->trading->placeOrder($wallet, [
@@ -236,7 +268,7 @@ class SkipRoundExecutionService
 
         $order->matched_size = $matchedSize;
         $order->matched_notional = $matchedNotional;
-        $remaining = bcsub((string) $order->bet_amount, $matchedNotional, 8);
+        $remaining = bcsub((string) $order->limit_order_notional, $matchedNotional, 8);
         $order->remaining_notional = bccomp($remaining, '0', 8) === -1 ? '0' : $remaining;
         $avgFillPrice = (string) ($remote['avg_price'] ?? $remote['avgPrice'] ?? '');
         $order->avg_fill_price = $avgFillPrice === '' ? null : $avgFillPrice;
