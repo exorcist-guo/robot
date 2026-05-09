@@ -17,7 +17,7 @@ class SkipRoundConfigProvider
             'resolution_source' => 'https://data.chain.link/streams/btc-usd',
             'symbol' => 'btc/usd',
             'base_size' => '5',
-            'loss_bet_multiplier' => '2',
+            'loss_bet_multiplier' => '1',
             'max_lose_reset_limit' => 5,
             'min_predict_diff' => '1',
         ];

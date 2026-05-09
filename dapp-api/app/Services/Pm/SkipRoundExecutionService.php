@@ -144,46 +144,62 @@ class SkipRoundExecutionService
      */
     private function advanceSubmittedOrder(PmCustodyWallet $wallet, PmSkipRoundOrder $order, array $market, int $currentRoundEnd): PmSkipRoundOrder
     {
-        $this->refreshRemoteOrder($wallet, $order);
-        $order->refresh();
+        // 续跑到已提交挂单的订单时，进入持续轮询：
+        // - 只要还没全成，就每秒刷新一次远端订单状态
+        // - 一直等到接近本轮结束、满足撤单条件时才发起撤单并退出这段轮询
+        // - 如果中途已经全部成交，则直接标记 filled 返回
+        while (true) {
+            $this->refreshRemoteOrder($wallet, $order);
+            $order->refresh();
 
-        if (bccomp((string) $order->remaining_notional, '0', 8) <= 0) {
-            $order->status = PmSkipRoundOrder::STATUS_FILLED;
-            $order->save();
-            return $order;
+            // 如果剩余未成交金额已经 <= 0，说明这笔挂单已全部成交。
+            if (bccomp((string) $order->remaining_notional, '0', 8) <= 0) {
+                $order->status = PmSkipRoundOrder::STATUS_FILLED;
+                $order->save();
+                return $order;
+            }
+
+            // 距离当前轮结束只剩 5 秒时，仍未全部成交，则发起撤单并退出循环。
+            if ($order->remote_order_id && $order->cancel_requested_at === null && time() >= ($currentRoundEnd - 5)) {
+                $order->cancel_requested_at = now();
+                $order->status = PmSkipRoundOrder::STATUS_CANCEL_REQUESTED;
+                $order->save();
+                $cancelResponse = $this->cancelOrderService->cancel($wallet, (string) $order->remote_order_id);
+                $order->snapshot = array_merge($order->snapshot ?? [], ['cancel_response' => $cancelResponse]);
+                $order->save();
+                break;
+            }
+            if(time() >= ($currentRoundEnd - 20)){
+                break;
+            }
+
+            sleep(1);
         }
 
-        if (time() < ($currentRoundEnd - 5)) {
-            return $order;
-        }
-
-        if ($order->remote_order_id && $order->cancel_requested_at === null) {
-            $order->cancel_requested_at = now();
-            $order->status = PmSkipRoundOrder::STATUS_CANCEL_REQUESTED;
-            $order->save();
-            $cancelResponse = $this->cancelOrderService->cancel($wallet, (string) $order->remote_order_id);
-            $order->snapshot = array_merge($order->snapshot ?? [], ['cancel_response' => $cancelResponse]);
-            $order->save();
-        }
-
+        // 撤单后继续推进：确认撤单、检查剩余金额、必要时补市价单。
         return $this->advanceCanceledOrder($wallet, $order->fresh());
     }
 
     private function advanceCanceledOrder(PmCustodyWallet $wallet, PmSkipRoundOrder $order): PmSkipRoundOrder
     {
         if ($order->remote_order_id) {
+            // 撤单请求发出后，再拉一次远端订单，确认是否还有新增成交，
+            // 并把 cancel_confirmed_at 补上，表示撤单流程已经推进过。
             $this->refreshRemoteOrder($wallet, $order);
             $order->refresh();
             $order->cancel_confirmed_at = $order->cancel_confirmed_at ?: now();
             $order->save();
         }
 
+        // 如果撤单前其实已经全部成交，就不需要再补市价单了。
         if (bccomp((string) $order->remaining_notional, '0', 8) <= 0) {
             $order->status = PmSkipRoundOrder::STATUS_FILLED;
             $order->save();
             return $order;
         }
 
+        // 还有剩余未成交金额时，按当前盘口估一个可立即成交的价格，
+        // 然后补一笔 FOK BUY 单，把剩余金额尽快买进去。
         $marketPrice = $this->trading->getOrderBookMarketPrice((string) $order->token_id, PolymarketTradingService::SIDE_BUY, (string) $order->remaining_notional);
         $price = (string) ($marketPrice['price'] ?? $order->limit_price ?? '0');
         if ($price === '' || $price === '0') {
@@ -242,10 +258,14 @@ class SkipRoundExecutionService
         }
 
         try {
+            // 读取远端单个订单的最新状态，这是判断“挂单有没有成交”的核心来源。
             $remote = $this->trading->getUserOrder($wallet, (string) $order->remote_order_id);
+            // var_dump($remote);
         } catch (\Throwable $e) {
             $message = strtolower($e->getMessage());
             if (str_contains($message, 'json response is not an array') || str_contains($message, 'response body: null')) {
+                // Polymarket 单笔订单接口偶尔会返回 null。
+                // 这时不直接把整条续跑链路打崩，只把异常记到 snapshot，等待下一轮重试。
                 $order->snapshot = array_merge($order->snapshot ?? [], [
                     'last_remote_order_error' => [
                         'message' => $e->getMessage(),
@@ -260,19 +280,31 @@ class SkipRoundExecutionService
             throw $e;
         }
 
+        // 兼容不同字段名，统一提取：
+        // - matchedSize：已成交 size
+        // - matchedNotional：已成交金额
         $matchedSize = (string) ($remote['size_matched'] ?? $remote['filled_size'] ?? $remote['matched_size'] ?? $remote['sizeMatched'] ?? '0');
         $matchedNotional = (string) ($remote['takingAmount'] ?? $remote['filledAmount'] ?? $remote['filled_amount'] ?? '0');
         if (($matchedNotional === '' || $matchedNotional === '0') && preg_match('/^\d+(\.\d+)?$/', (string) $order->limit_price) === 1 && preg_match('/^\d+(\.\d+)?$/', $matchedSize) === 1) {
+            // 有些返回没有直接给成交金额，这时用“成交 size × 挂单 price”回推名义成交金额。
             $matchedNotional = bcmul((string) $order->limit_price, $matchedSize, 8);
         }
 
         $order->matched_size = $matchedSize;
         $order->matched_notional = $matchedNotional;
+
+        // remaining_notional 表示还剩多少金额没成交。
+        // 通过“理论总成交金额 - 已成交金额”来判断是否已全部成交。
         $remaining = bcsub((string) $order->limit_order_notional, $matchedNotional, 8);
         $order->remaining_notional = bccomp($remaining, '0', 8) === -1 ? '0' : $remaining;
+
         $avgFillPrice = (string) ($remote['avg_price'] ?? $remote['avgPrice'] ?? '');
         $order->avg_fill_price = $avgFillPrice === '' ? null : $avgFillPrice;
         $order->snapshot = array_merge($order->snapshot ?? [], ['last_remote_order' => $remote]);
+
+        // 只要有成交金额，就根据 remaining_notional 判断：
+        // - > 0：部分成交
+        // - <= 0：全部成交
         if (bccomp((string) $order->matched_notional, '0', 8) === 1) {
             $order->status = bccomp((string) $order->remaining_notional, '0', 8) === 1
                 ? PmSkipRoundOrder::STATUS_PARTIALLY_FILLED

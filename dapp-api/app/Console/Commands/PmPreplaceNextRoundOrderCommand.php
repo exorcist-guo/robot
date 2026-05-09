@@ -11,6 +11,7 @@ use App\Services\Pm\SkipRoundExecutionService;
 use App\Services\Pm\SkipRoundLineStateService;
 use App\Services\Pm\SkipRoundMarketResolverService;
 use App\Services\Pm\SkipRoundPredictService;
+use Cache;
 use Illuminate\Console\Command;
 
 class PmPreplaceNextRoundOrderCommand extends Command
@@ -35,10 +36,15 @@ class PmPreplaceNextRoundOrderCommand extends Command
         GammaClient $gammaClient,
         PmPrivateKeyResolver $resolver,
     ) {
-        try{
+        $runOnce = (bool) $this->option('once');
+
+        try {
             while (true) {
-                sleep(5); // 每 5 秒执行一次，避免过于频繁地查询数据库和远程接口
-                var_dump(date('Y-m-d H:i:s ').'我开始跑了');
+                if (!$runOnce) {
+                    sleep(5); // 常驻模式下每 5 秒执行一次，避免过于频繁地查询数据库和远程接口
+                }
+                $this->reconnectRedis();
+                var_dump(date('Y-m-d H:i:s ') . '我开始跑了');
                 $config = $configProvider->get();
 
                 $boot = $lineStateService->bootstrap($config);
@@ -60,8 +66,11 @@ class PmPreplaceNextRoundOrderCommand extends Command
                         $pendingOrder->status = PmSkipRoundOrder::STATUS_FAILED;
                         $pendingOrder->fail_reason = 'missing_wallet';
                         $pendingOrder->save();
-                        $this->error(($config['strategy_key'] ?? 'skip-round').' 续跑失败: missing_wallet');
-                        return self::FAILURE;
+                        $this->error(($config['strategy_key'] ?? 'skip-round') . ' 续跑失败: missing_wallet');
+                        if ($runOnce) {
+                            return self::FAILURE;
+                        }
+                        continue;
                     }
 
                     $resolver->resolve($wallet);
@@ -70,8 +79,11 @@ class PmPreplaceNextRoundOrderCommand extends Command
 
                     try {
                         $executionService->advance($wallet, $pendingOrder, $config, $market, $currentRoundEnd);
-                        $this->info(($config['strategy_key'] ?? 'skip-round')." 已续跑隔一轮订单: {$pendingOrder->id}");
-                        return self::SUCCESS;
+                        $this->info(($config['strategy_key'] ?? 'skip-round') . " 已续跑隔一轮订单: {$pendingOrder->id}");
+                        if ($runOnce) {
+                            return self::SUCCESS;
+                        }
+                        continue;
                     } catch (\Throwable $e) {
                         $pendingOrder->refresh();
                         $message = $e->getMessage();
@@ -93,8 +105,11 @@ class PmPreplaceNextRoundOrderCommand extends Command
                         $strategy->last_ran_at = now();
                         $strategy->save();
 
-                        $this->error(($config['strategy_key'] ?? 'skip-round').' 续跑失败: '.$message);
-                        return self::FAILURE;
+                        $this->error(($config['strategy_key'] ?? 'skip-round') . ' 续跑失败: ' . $message);
+                        if ($runOnce) {
+                            return self::FAILURE;
+                        }
+                        continue;
                     }
                 }
 
@@ -103,8 +118,11 @@ class PmPreplaceNextRoundOrderCommand extends Command
                 $prediction = $predictService->predict($config, $now);
 
                 if (($prediction['ok'] ?? false) !== true) {
-                    $this->line(($config['strategy_key'] ?? 'skip-round').' 跳过: '.json_encode($prediction, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
-                    return self::SUCCESS;
+                    $this->line(($config['strategy_key'] ?? 'skip-round') . ' 跳过: ' . json_encode($prediction, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+                    if ($runOnce) {
+                        return self::SUCCESS;
+                    }
+                    continue;
                 }
 
                 $resolved = $marketResolver->resolveAndStore($strategy, $config, $prediction, $gammaClient);
@@ -112,8 +130,11 @@ class PmPreplaceNextRoundOrderCommand extends Command
                     $strategy->last_error = (string) ($resolved['reason'] ?? 'market_resolve_failed');
                     $strategy->last_ran_at = now();
                     $strategy->save();
-                    $this->line(($config['strategy_key'] ?? 'skip-round').' 跳过: '.json_encode($resolved, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
-                    return self::SUCCESS;
+                    $this->line(($config['strategy_key'] ?? 'skip-round') . ' 跳过: ' . json_encode($resolved, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+                    if ($runOnce) {
+                        return self::SUCCESS;
+                    }
+                    continue;
                 }
 
                 $market = $resolved['market'];
@@ -128,11 +149,14 @@ class PmPreplaceNextRoundOrderCommand extends Command
                     ->first();
                 if ($existingOrder) {
                     if (in_array((string) $existingOrder->status, PmSkipRoundOrder::ACTIVE_STATUSES, true)) {
-                        $this->line(($config['strategy_key'] ?? 'skip-round')." 当前轮已存在活跃订单: {$existingOrder->id}");
+                        $this->line(($config['strategy_key'] ?? 'skip-round') . " 当前轮已存在活跃订单: {$existingOrder->id}");
                     } else {
-                        $this->line(($config['strategy_key'] ?? 'skip-round')." 当前轮已存在历史订单，跳过重复创建: {$existingOrder->id} [{$existingOrder->status}]");
+                        $this->line(($config['strategy_key'] ?? 'skip-round') . " 当前轮已存在历史订单，跳过重复创建: {$existingOrder->id} [{$existingOrder->status}]");
                     }
-                    return self::SUCCESS;
+                    if ($runOnce) {
+                        return self::SUCCESS;
+                    }
+                    continue;
                 }
 
                 $order = PmSkipRoundOrder::create([
@@ -168,8 +192,11 @@ class PmPreplaceNextRoundOrderCommand extends Command
                     $strategy->last_error = 'missing_token_id';
                     $strategy->last_ran_at = now();
                     $strategy->save();
-                    $this->error(($config['strategy_key'] ?? 'skip-round').' 执行失败: missing_token_id');
-                    return self::FAILURE;
+                    $this->error(($config['strategy_key'] ?? 'skip-round') . ' 执行失败: missing_token_id');
+                    if ($runOnce) {
+                        return self::FAILURE;
+                    }
+                    continue;
                 }
 
                 $wallet = PmCustodyWallet::with('apiCredentials')
@@ -179,8 +206,11 @@ class PmPreplaceNextRoundOrderCommand extends Command
                     $order->status = PmSkipRoundOrder::STATUS_FAILED;
                     $order->fail_reason = 'missing_wallet';
                     $order->save();
-                    $this->error(($config['strategy_key'] ?? 'skip-round').' 执行失败: missing_wallet');
-                    return self::FAILURE;
+                    $this->error(($config['strategy_key'] ?? 'skip-round') . ' 执行失败: missing_wallet');
+                    if ($runOnce) {
+                        return self::FAILURE;
+                    }
+                    continue;
                 }
 
                 $resolver->resolve($wallet);
@@ -192,8 +222,11 @@ class PmPreplaceNextRoundOrderCommand extends Command
                     $strategy->last_error = null;
                     $strategy->save();
                     $lineStateService->rotate($strategy);
-                    $this->info(($config['strategy_key'] ?? 'skip-round')." 已创建并执行隔一轮订单: {$order->id}");
-                    return self::SUCCESS;
+                    $this->info(($config['strategy_key'] ?? 'skip-round') . " 已创建并执行隔一轮订单: {$order->id}");
+                    if ($runOnce) {
+                        return self::SUCCESS;
+                    }
+                    continue;
                 } catch (\Throwable $e) {
                     $message = $e->getMessage();
                     $order->status = PmSkipRoundOrder::STATUS_FAILED;
@@ -214,16 +247,49 @@ class PmPreplaceNextRoundOrderCommand extends Command
                     $strategy->last_ran_at = now();
                     $strategy->save();
 
-                    $this->error(($config['strategy_key'] ?? 'skip-round').' 执行失败: '.$message);
-
+                    $this->error(($config['strategy_key'] ?? 'skip-round') . ' 执行失败: ' . $message);
+                    if ($runOnce) {
+                        return self::FAILURE;
+                    }
+                    continue;
                 }
             }
+        } catch (\Throwable $e) {
+            $this->error('执行失败: ' . $e->getMessage());
+            return self::FAILURE;
+        }
+    }
 
-        }catch (\Throwable $e) {
-            $this->error('执行失败: '.$e->getMessage());
 
+    /**
+     * 重连 Redis，避免长时间运行后连接超时
+     */
+    private function reconnectRedis(): void
+    {
+        try {
+            // 测试 Cache Redis 连接是否正常（使用 ping 而不是 flush）
+            Cache::getStore()->getRedis()->ping();
+        } catch (\Throwable) {
+            // 如果 ping 失败，说明连接已断开，强制重建连接池
+            try {
+                $app = app();
+                $app->forgetInstance('cache');
+                $app->forgetInstance('cache.store');
+                Cache::purge();
+            } catch (\Throwable) {
+                // 忽略重建失败
+            }
         }
 
-
+        try {
+            // 测试 Redis Facade 连接是否正常
+            \Illuminate\Support\Facades\Redis::connection()->ping();
+        } catch (\Throwable) {
+            try {
+                \Illuminate\Support\Facades\Redis::purge();
+            } catch (\Throwable) {
+                // 忽略重建失败
+            }
+        }
     }
 }
