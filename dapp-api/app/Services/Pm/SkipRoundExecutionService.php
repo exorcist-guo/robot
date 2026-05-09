@@ -161,8 +161,8 @@ class SkipRoundExecutionService
                 return $order;
             }
 
-            // 距离当前轮结束只剩 5 秒时，仍未全部成交，则发起撤单并退出循环。
-            if ($order->remote_order_id && $order->cancel_requested_at === null && time() >= ($currentRoundEnd - 5)) {
+            // 距离当前轮结束只剩 10 秒时，仍未全部成交，则发起撤单并退出循环。
+            if ($order->remote_order_id && $order->cancel_requested_at === null && time() >= ($currentRoundEnd - 10)) {
                 $order->cancel_requested_at = now();
                 $order->status = PmSkipRoundOrder::STATUS_CANCEL_REQUESTED;
                 $order->save();
@@ -198,12 +198,28 @@ class SkipRoundExecutionService
     private function advanceCanceledOrder(PmCustodyWallet $wallet, PmSkipRoundOrder $order): PmSkipRoundOrder
     {
         if ($order->remote_order_id) {
-            // 撤单请求发出后，再拉一次远端订单，确认是否还有新增成交，
-            // 并把 cancel_confirmed_at 补上，表示撤单流程已经推进过。
-            $this->refreshRemoteOrder($wallet, $order);
-            $order->refresh();
-            $order->cancel_confirmed_at = $order->cancel_confirmed_at ?: now();
-            $order->save();
+            // 撤单请求发出后，不只查一次远端状态，而是循环确认 3 次，
+            // 每次间隔 2 秒，尽量避免刚撤单时远端状态还未来得及同步。
+            for ($attempt = 0; $attempt < 3; $attempt++) {
+                $this->refreshRemoteOrder($wallet, $order);
+                $order->refresh();
+
+                $lastRemoteOrder = is_array($order->snapshot['last_remote_order'] ?? null) ? $order->snapshot['last_remote_order'] : [];
+                $remoteStatus = strtoupper(trim((string) ($lastRemoteOrder['status'] ?? '')));
+                $cancelResponse = is_array($order->snapshot['cancel_response'] ?? null) ? $order->snapshot['cancel_response'] : [];
+                $canceledOrders = is_array($cancelResponse['canceled'] ?? null) ? $cancelResponse['canceled'] : [];
+                $isCanceledByResponse = in_array((string) $order->remote_order_id, array_map('strval', $canceledOrders), true);
+
+                if ($remoteStatus === 'CANCELED' || $isCanceledByResponse) {
+                    $order->cancel_confirmed_at = $order->cancel_confirmed_at ?: now();
+                    $order->save();
+                    break;
+                }
+
+                if ($attempt < 2) {
+                    sleep(2);
+                }
+            }
         }
 
         // 如果撤单前其实已经全部成交，就不需要再补市价单了。
@@ -229,21 +245,37 @@ class SkipRoundExecutionService
             return $order;
         }
 
-        // 还有剩余未成交金额时，按当前盘口估一个可立即成交的价格，
-        // 然后补一笔 FOK BUY 单，把剩余金额尽快买进去。
-        $marketPrice = $this->trading->getOrderBookMarketPrice((string) $order->token_id, PolymarketTradingService::SIDE_BUY, (string) $order->remaining_notional);
+        // 还有剩余未成交份额时，按当前盘口估一个可立即成交的价格，
+        // 然后补一笔 FOK BUY 单，把剩余 size 尽快买进去。
+        $filledSize = preg_match('/^\d+(\.\d+)?$/', (string) $order->matched_size) === 1 ? (string) $order->matched_size : '0';
+        $remainingSize = bcsub((string) $order->limit_order_size, $filledSize, 8);
+        if (bccomp($remainingSize, '0', 8) <= 0) {
+            $order->status = PmSkipRoundOrder::STATUS_FILLED;
+            $order->save();
+            return $order;
+        }
+
+        $marketPrice = $this->trading->getOrderBookMarketPrice(
+            (string) $order->token_id,
+            PolymarketTradingService::SIDE_BUY,
+            '0',
+            $remainingSize
+        );
         $executionPrice = (string) ($marketPrice['price'] ?? $order->limit_price ?? '0');
         if ($executionPrice === '' || $executionPrice === '0') {
             $order->status = PmSkipRoundOrder::STATUS_FAILED;
             $order->fail_reason = 'missing_market_buy_price';
-            $order->snapshot = array_merge($order->snapshot ?? [], ['market_price' => $marketPrice]);
+            $order->snapshot = array_merge($order->snapshot ?? [], [
+                'market_price' => $marketPrice,
+                'remaining_size' => $remainingSize,
+            ]);
             $order->save();
             return $order;
         }
 
         $normalizedPrice = BigDecimal::of($executionPrice)->toScale(4, RoundingMode::DOWN)->stripTrailingZeros()->__toString();
-        $normalizedSize = BigDecimal::of((string) $order->remaining_notional)
-            ->dividedBy($normalizedPrice, 2, RoundingMode::DOWN)
+        $normalizedSize = BigDecimal::of($remainingSize)
+            ->toScale(2, RoundingMode::DOWN)
             ->stripTrailingZeros()
             ->__toString();
         $normalizedNotional = BigDecimal::of($normalizedPrice)
@@ -266,6 +298,7 @@ class SkipRoundExecutionService
         } catch (\Throwable $e) {
             $order->snapshot = array_merge($order->snapshot ?? [], [
                 'market_price' => $marketPrice,
+                'remaining_size' => $remainingSize,
                 'market_buy_normalized_price' => $normalizedPrice,
                 'market_buy_normalized_size' => $normalizedSize,
                 'market_buy_normalized_notional' => $normalizedNotional,

@@ -286,7 +286,10 @@ class PolymarketTradingService
                 : $priceB <=> $priceA;
         });
 
-        $remaining = BigDecimal::of($amount);
+        $remaining = strtoupper($side) === self::SIDE_BUY && $size !== null && preg_match('/^\d+(\.\d+)?$/', $size) === 1 && bccomp($size, '0', 8) === 1
+            ? BigDecimal::of($size)
+            : BigDecimal::of($amount);
+        $useSizeForBuy = strtoupper($side) === self::SIDE_BUY && $size !== null && preg_match('/^\d+(\.\d+)?$/', $size) === 1 && bccomp($size, '0', 8) === 1;
         $marketPrice = null;
         $consumedSize = BigDecimal::zero();
         $consumedNotional = BigDecimal::zero();
@@ -301,13 +304,13 @@ class PolymarketTradingService
             $priceDec = BigDecimal::of($price);
             $sizeDec = BigDecimal::of($levelSize);
             $consumable = strtoupper($side) === self::SIDE_BUY
-                ? $priceDec->multipliedBy($sizeDec)
+                ? ($useSizeForBuy ? $sizeDec : $priceDec->multipliedBy($sizeDec))
                 : $sizeDec;
 
             $marketPrice = $price;
             if ($remaining->isLessThanOrEqualTo($consumable)) {
                 $fillSize = strtoupper($side) === self::SIDE_BUY
-                    ? $remaining->dividedBy($priceDec, 8, RoundingMode::DOWN)
+                    ? ($useSizeForBuy ? $remaining : $remaining->dividedBy($priceDec, 8, RoundingMode::DOWN))
                     : $remaining;
 
                 $consumedSize = $consumedSize->plus($fillSize);

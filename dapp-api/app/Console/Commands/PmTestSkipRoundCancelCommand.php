@@ -11,13 +11,15 @@ use App\Services\Pm\SkipRoundLineStateService;
 use App\Services\Pm\SkipRoundMarketResolverService;
 use App\Services\Pm\SkipRoundOrderbookService;
 use App\Services\Pm\SkipRoundPredictService;
+use Brick\Math\BigDecimal;
+use Brick\Math\RoundingMode;
 use Illuminate\Console\Command;
 
 class PmTestSkipRoundCancelCommand extends Command
 {
     protected $signature = 'pm:test-skip-round-cancel {--size=0.1 : 下单 size，默认 0.1}';
 
-    protected $description = '自动计算下一轮 market，挂一笔小额 BUY 限价单，再查询并撤单';
+    protected $description = '自动计算下一轮 market，挂一笔小额 BUY 限价单，再查询、撤单，并验证补市价单';
 
     public function handle(
         PolymarketTradingService $trading,
@@ -41,13 +43,6 @@ class PmTestSkipRoundCancelCommand extends Command
             $this->error('wallet 不存在');
             return self::FAILURE;
         }
-
-        // $remoteOrderId = '0x05229d2415b9429483a78298158f2cbfa66e9ccd2d4433d89f1944699c851ba8';
-        // $cancelResponse = $cancelService->cancel($wallet, $remoteOrderId);
-        // $beforeCancel = $trading->getUserOrder($wallet, $remoteOrderId);
-        // var_dump($beforeCancel);
-
-        // exit;
 
         try {
             $boot = $lineStateService->bootstrap($config);
@@ -129,7 +124,6 @@ class PmTestSkipRoundCancelCommand extends Command
 
             sleep(2);
 
-
             try {
                 $beforeCancel = $trading->getUserOrder($wallet, $remoteOrderId);
                 $this->info('撤单前远端状态');
@@ -138,13 +132,13 @@ class PmTestSkipRoundCancelCommand extends Command
                 $this->warn('撤单前查询单笔订单失败：' . $e->getMessage());
             }
 
-
             $cancelResponse = $cancelService->cancel($wallet, $remoteOrderId);
             $this->info('撤单请求结果');
             $this->line(json_encode($cancelResponse, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
 
             sleep(2);
 
+            $afterCancel = null;
             try {
                 $afterCancel = $trading->getUserOrder($wallet, $remoteOrderId);
                 $this->info('撤单后远端状态');
@@ -166,6 +160,73 @@ class PmTestSkipRoundCancelCommand extends Command
             } catch (\Throwable $e) {
                 $this->warn('撤单后查询用户订单列表失败：' . $e->getMessage());
             }
+
+            $isCanceled = false;
+            $canceled = is_array($cancelResponse['canceled'] ?? null) ? $cancelResponse['canceled'] : [];
+            if (in_array($remoteOrderId, array_map('strval', $canceled), true)) {
+                $isCanceled = true;
+            }
+            if (is_array($afterCancel) && strtoupper((string) ($afterCancel['status'] ?? '')) === 'CANCELED') {
+                $isCanceled = true;
+            }
+
+            if (!$isCanceled) {
+                $this->warn('未确认远端已撤销，跳过补市价单测试');
+                return self::SUCCESS;
+            }
+
+            $remainingSize = BigDecimal::of($size)
+                ->toScale(2, RoundingMode::DOWN)
+                ->stripTrailingZeros()
+                ->__toString();
+            $marketPrice = $trading->getOrderBookMarketPrice(
+                $tokenId,
+                PolymarketTradingService::SIDE_BUY,
+                '0',
+                $remainingSize
+            );
+            $executionPrice = (string) ($marketPrice['price'] ?? '0');
+            if ($executionPrice === '' || $executionPrice === '0') {
+                $this->warn('未拿到可用市价，跳过补市价单测试');
+                return self::SUCCESS;
+            }
+
+            $normalizedPrice = BigDecimal::of($executionPrice)->toScale(4, RoundingMode::DOWN)->stripTrailingZeros()->__toString();
+            $normalizedSize = BigDecimal::of($remainingSize)
+                ->toScale(2, RoundingMode::DOWN)
+                ->stripTrailingZeros()
+                ->__toString();
+            $normalizedNotional = BigDecimal::of($normalizedPrice)
+                ->multipliedBy($normalizedSize)
+                ->toScale(6, RoundingMode::DOWN)
+                ->__toString();
+
+            $this->info('准备补市价单');
+            $this->line(json_encode([
+                'market_price' => $marketPrice,
+                'normalized_price' => $normalizedPrice,
+                'normalized_size' => $normalizedSize,
+                'normalized_notional' => $normalizedNotional,
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+
+            $marketBuyPlaced = $trading->placeOrder($wallet, [
+                'token_id' => $tokenId,
+                'market_id' => $marketId,
+                'outcome' => $outcome,
+                'side' => PolymarketTradingService::SIDE_BUY,
+                'price' => $normalizedPrice,
+                'size' => $normalizedSize,
+                'order_type' => 'FOK',
+                'defer_exec' => false,
+                'expiration' => '0',
+            ]);
+
+            $marketBuyResponse = is_array($marketBuyPlaced['response'] ?? null) ? $marketBuyPlaced['response'] : [];
+            $this->info('补市价单结果');
+            $this->line(json_encode([
+                'request' => $marketBuyPlaced['request'] ?? [],
+                'response' => $marketBuyResponse,
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
 
             return self::SUCCESS;
         } catch (\Throwable $e) {
