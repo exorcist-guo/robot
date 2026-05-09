@@ -59,7 +59,7 @@ class Kernel extends ConsoleKernel
 
         // 每小时扫描所有钱包并自动领取奖励（1小时以上的订单）
         $schedule->command('pm:claim-position --scan-all')
-        ->hourly()
+        ->everyTenMinutes()
         ->withoutOverlapping();
 
         // 每 6 小时同步排行榜用户、成交记录与统计
