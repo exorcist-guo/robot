@@ -38,8 +38,9 @@ class PmPreplaceNextRoundOrderCommand extends Command
     ) {
         $runOnce = (bool) $this->option('once');
 
-        try {
+
             while (true) {
+                try {
                 if (!$runOnce) {
                     sleep(5); // 常驻模式下每 5 秒执行一次，避免过于频繁地查询数据库和远程接口
                 }
@@ -253,11 +254,12 @@ class PmPreplaceNextRoundOrderCommand extends Command
                     }
                     continue;
                 }
+            } catch (\Throwable $e) {
+                $this->error('执行失败: ' . $e->getMessage());
+                continue;
             }
-        } catch (\Throwable $e) {
-            $this->error('执行失败: ' . $e->getMessage());
-            return self::FAILURE;
-        }
+            }
+
     }
 
 

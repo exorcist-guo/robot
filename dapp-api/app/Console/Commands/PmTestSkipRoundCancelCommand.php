@@ -42,6 +42,13 @@ class PmTestSkipRoundCancelCommand extends Command
             return self::FAILURE;
         }
 
+        // $remoteOrderId = '0x05229d2415b9429483a78298158f2cbfa66e9ccd2d4433d89f1944699c851ba8';
+        // $cancelResponse = $cancelService->cancel($wallet, $remoteOrderId);
+        // $beforeCancel = $trading->getUserOrder($wallet, $remoteOrderId);
+        // var_dump($beforeCancel);
+
+        // exit;
+
         try {
             $boot = $lineStateService->bootstrap($config);
             $strategy = $boot['strategy'];
@@ -77,7 +84,7 @@ class PmTestSkipRoundCancelCommand extends Command
                 return self::FAILURE;
             }
 
-            $price = bcadd((string) $level['price'], '0', 2);
+            $price = '0.1';
             $this->info('准备挂单');
             $this->line(json_encode([
                 'member_id' => (int) $config['member_id'],
@@ -122,6 +129,7 @@ class PmTestSkipRoundCancelCommand extends Command
 
             sleep(2);
 
+
             try {
                 $beforeCancel = $trading->getUserOrder($wallet, $remoteOrderId);
                 $this->info('撤单前远端状态');
@@ -129,6 +137,7 @@ class PmTestSkipRoundCancelCommand extends Command
             } catch (\Throwable $e) {
                 $this->warn('撤单前查询单笔订单失败：' . $e->getMessage());
             }
+
 
             $cancelResponse = $cancelService->cancel($wallet, $remoteOrderId);
             $this->info('撤单请求结果');

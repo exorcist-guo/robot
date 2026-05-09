@@ -213,6 +213,22 @@ class SkipRoundExecutionService
             return $order;
         }
 
+        // 只有在远端状态已经明确是 CANCELED 时，才允许补市价单。
+        // 否则宁可停在当前状态，也不能在“原单还可能活着”的情况下继续补单，避免重复持仓。
+        $lastRemoteOrder = is_array($order->snapshot['last_remote_order'] ?? null) ? $order->snapshot['last_remote_order'] : [];
+        $remoteStatus = strtoupper(trim((string) ($lastRemoteOrder['status'] ?? '')));
+        $cancelResponse = is_array($order->snapshot['cancel_response'] ?? null) ? $order->snapshot['cancel_response'] : [];
+        $canceledOrders = is_array($cancelResponse['canceled'] ?? null) ? $cancelResponse['canceled'] : [];
+        $isCanceledByResponse = in_array((string) $order->remote_order_id, array_map('strval', $canceledOrders), true);
+        if ($remoteStatus !== 'CANCELED' && !$isCanceledByResponse) {
+            $order->snapshot = array_merge($order->snapshot ?? [], [
+                'cancel_resolution' => 'cancel_not_confirmed',
+                'cancel_resolution_message' => 'remote order not confirmed canceled; skip market buy to avoid duplicate position',
+            ]);
+            $order->save();
+            return $order;
+        }
+
         // 还有剩余未成交金额时，按当前盘口估一个可立即成交的价格，
         // 然后补一笔 FOK BUY 单，把剩余金额尽快买进去。
         $marketPrice = $this->trading->getOrderBookMarketPrice((string) $order->token_id, PolymarketTradingService::SIDE_BUY, (string) $order->remaining_notional);
@@ -301,12 +317,9 @@ class SkipRoundExecutionService
         try {
             // 读取远端单个订单的最新状态，这是判断“挂单有没有成交”的核心来源。
             $remote = $this->trading->getUserOrder($wallet, (string) $order->remote_order_id);
-            // var_dump($remote);
         } catch (\Throwable $e) {
             $message = strtolower($e->getMessage());
             if (str_contains($message, 'json response is not an array') || str_contains($message, 'response body: null')) {
-                // Polymarket 单笔订单接口偶尔会返回 null。
-                // 这时不直接把整条续跑链路打崩，只把异常记到 snapshot，等待下一轮重试。
                 $order->snapshot = array_merge($order->snapshot ?? [], [
                     'last_remote_order_error' => [
                         'message' => $e->getMessage(),
@@ -321,21 +334,14 @@ class SkipRoundExecutionService
             throw $e;
         }
 
-        // 兼容不同字段名，统一提取：
-        // - matchedSize：已成交 size
-        // - matchedNotional：已成交金额
         $matchedSize = (string) ($remote['size_matched'] ?? $remote['filled_size'] ?? $remote['matched_size'] ?? $remote['sizeMatched'] ?? '0');
         $matchedNotional = (string) ($remote['takingAmount'] ?? $remote['filledAmount'] ?? $remote['filled_amount'] ?? '0');
         if (($matchedNotional === '' || $matchedNotional === '0') && preg_match('/^\d+(\.\d+)?$/', (string) $order->limit_price) === 1 && preg_match('/^\d+(\.\d+)?$/', $matchedSize) === 1) {
-            // 有些返回没有直接给成交金额，这时用“成交 size × 挂单 price”回推名义成交金额。
             $matchedNotional = bcmul((string) $order->limit_price, $matchedSize, 8);
         }
 
         $order->matched_size = $matchedSize;
         $order->matched_notional = $matchedNotional;
-
-        // remaining_notional 表示还剩多少金额没成交。
-        // 通过“理论总成交金额 - 已成交金额”来判断是否已全部成交。
         $remaining = bcsub((string) $order->limit_order_notional, $matchedNotional, 8);
         $order->remaining_notional = bccomp($remaining, '0', 8) === -1 ? '0' : $remaining;
 
@@ -343,10 +349,17 @@ class SkipRoundExecutionService
         $order->avg_fill_price = $avgFillPrice === '' ? null : $avgFillPrice;
         $order->snapshot = array_merge($order->snapshot ?? [], ['last_remote_order' => $remote]);
 
-        // 只要有成交金额，就根据 remaining_notional 判断：
-        // - > 0：部分成交
-        // - <= 0：全部成交
-        if (bccomp((string) $order->matched_notional, '0', 8) === 1) {
+        // 优先消费远端 status，避免只靠 matched_notional 推断本地状态。
+        $remoteStatus = strtoupper(trim((string) ($remote['status'] ?? '')));
+        if ($remoteStatus === 'MATCHED') {
+            $order->remaining_notional = '0';
+            $order->status = PmSkipRoundOrder::STATUS_FILLED;
+        } elseif ($remoteStatus === 'CANCELED') {
+            $order->cancel_confirmed_at = $order->cancel_confirmed_at ?: now();
+            $order->status = bccomp((string) $order->matched_notional, '0', 8) === 1
+                ? PmSkipRoundOrder::STATUS_FILLED
+                : PmSkipRoundOrder::STATUS_CANCEL_REQUESTED;
+        } elseif (bccomp((string) $order->matched_notional, '0', 8) === 1) {
             $order->status = bccomp((string) $order->remaining_notional, '0', 8) === 1
                 ? PmSkipRoundOrder::STATUS_PARTIALLY_FILLED
                 : PmSkipRoundOrder::STATUS_FILLED;
