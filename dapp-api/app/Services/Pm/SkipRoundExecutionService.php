@@ -169,6 +169,19 @@ class SkipRoundExecutionService
                 $cancelResponse = $this->cancelOrderService->cancel($wallet, (string) $order->remote_order_id);
                 $order->snapshot = array_merge($order->snapshot ?? [], ['cancel_response' => $cancelResponse]);
                 $order->save();
+
+                $notCanceled = is_array($cancelResponse['not_canceled'] ?? null) ? $cancelResponse['not_canceled'] : [];
+                $notCanceledMessage = (string) ($notCanceled[(string) $order->remote_order_id] ?? '');
+                if ($notCanceledMessage !== '' && str_contains(strtolower($notCanceledMessage), 'already canceled or matched')) {
+                    // 远端已经找不到这笔单，通常表示它已被撤掉或已成交，
+                    // 这时不要立刻补一笔市价单，否则可能造成重复持仓。
+                    $order->snapshot = array_merge($order->snapshot ?? [], [
+                        'cancel_resolution' => 'remote_order_missing_after_cancel',
+                        'cancel_resolution_message' => $notCanceledMessage,
+                    ]);
+                    $order->save();
+                    return $order->fresh();
+                }
                 break;
             }
             if(time() >= ($currentRoundEnd - 20)){

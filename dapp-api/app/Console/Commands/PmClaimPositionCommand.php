@@ -85,10 +85,8 @@ class PmClaimPositionCommand extends Command
         foreach ($positions as $index => $pos) {
             $currentValue = (float) ($pos['currentValue'] ?? 0);
             $isRedeemable = (bool) ($pos['redeemable'] ?? false);
-            $canRedeemLosing = $includeLosing
-                && $currentValue <= 0
-                && $isRedeemable;
-            $isClaimable = ($currentValue > 0 || $canRedeemLosing) && $isRedeemable;
+            $canRedeemLosing = $currentValue <= 0 && $isRedeemable;
+            $isClaimable = $isRedeemable;
             $isLaggingRedeemed = false;
 
             if ($isClaimable) {
