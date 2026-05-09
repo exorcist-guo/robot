@@ -1107,9 +1107,23 @@ class PolymarketTradingService
      */
     private function ensureWrappedCollateral(PmCustodyWallet $wallet): void
     {
-        $result = $this->wrapCollateralToPusd($wallet);
-        if (($result['wrapped'] ?? false) !== true && ($result['reason'] ?? '') !== 'no_legacy_collateral_balance') {
-            throw new \RuntimeException('自动 wrap pUSD 失败');
+        $legacyToken = trim((string) config('pm.legacy_collateral_token'));
+        $owner = strtolower((string) $wallet->tradingAddress());
+        if ($legacyToken === '' || $owner === '') {
+            return;
+        }
+
+        $legacyBalance = $this->readErc20Balance($legacyToken, $owner);
+        // 只有旧资产余额大于 20（按 6 位精度即 20_000_000）时，才尝试自动 wrap。
+        if (bccomp($legacyBalance, '20000000', 0) !== 1) {
+            return;
+        }
+
+        try {
+            $this->wrapCollateralToPusd($wallet);
+        } catch (\Throwable) {
+            // 自动 wrap 失败时不中断 BUY 下单链路，后续继续按当前 collateral 状态做 readiness 检查。
+            return;
         }
     }
 
