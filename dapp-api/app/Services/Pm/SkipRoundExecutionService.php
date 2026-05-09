@@ -4,6 +4,8 @@ namespace App\Services\Pm;
 
 use App\Models\Pm\PmCustodyWallet;
 use App\Models\Pm\PmSkipRoundOrder;
+use Brick\Math\BigDecimal;
+use Brick\Math\RoundingMode;
 
 class SkipRoundExecutionService
 {
@@ -201,8 +203,8 @@ class SkipRoundExecutionService
         // 还有剩余未成交金额时，按当前盘口估一个可立即成交的价格，
         // 然后补一笔 FOK BUY 单，把剩余金额尽快买进去。
         $marketPrice = $this->trading->getOrderBookMarketPrice((string) $order->token_id, PolymarketTradingService::SIDE_BUY, (string) $order->remaining_notional);
-        $price = (string) ($marketPrice['price'] ?? $order->limit_price ?? '0');
-        if ($price === '' || $price === '0') {
+        $executionPrice = (string) ($marketPrice['price'] ?? $order->limit_price ?? '0');
+        if ($executionPrice === '' || $executionPrice === '0') {
             $order->status = PmSkipRoundOrder::STATUS_FAILED;
             $order->fail_reason = 'missing_market_buy_price';
             $order->snapshot = array_merge($order->snapshot ?? [], ['market_price' => $marketPrice]);
@@ -210,22 +212,45 @@ class SkipRoundExecutionService
             return $order;
         }
 
-        $size = bcdiv((string) $order->remaining_notional, $price, 2);
-        $placed = $this->trading->placeOrder($wallet, [
-            'token_id' => (string) $order->token_id,
-            'market_id' => (string) ($order->market_id ?? ''),
-            'outcome' => (string) ($order->predicted_side ?? ''),
-            'side' => PolymarketTradingService::SIDE_BUY,
-            'price' => $price,
-            'size' => $size,
-            'order_type' => 'FOK',
-            'defer_exec' => false,
-            'expiration' => '0',
-        ]);
+        $normalizedPrice = BigDecimal::of($executionPrice)->toScale(4, RoundingMode::DOWN)->stripTrailingZeros()->__toString();
+        $normalizedSize = BigDecimal::of((string) $order->remaining_notional)
+            ->dividedBy($normalizedPrice, 2, RoundingMode::DOWN)
+            ->stripTrailingZeros()
+            ->__toString();
+        $normalizedNotional = BigDecimal::of($normalizedPrice)
+            ->multipliedBy($normalizedSize)
+            ->toScale(6, RoundingMode::DOWN)
+            ->__toString();
+
+        try {
+            $placed = $this->trading->placeOrder($wallet, [
+                'token_id' => (string) $order->token_id,
+                'market_id' => (string) ($order->market_id ?? ''),
+                'outcome' => (string) ($order->predicted_side ?? ''),
+                'side' => PolymarketTradingService::SIDE_BUY,
+                'price' => $normalizedPrice,
+                'size' => $normalizedSize,
+                'order_type' => 'FOK',
+                'defer_exec' => false,
+                'expiration' => '0',
+            ]);
+        } catch (\Throwable $e) {
+            $order->snapshot = array_merge($order->snapshot ?? [], [
+                'market_price' => $marketPrice,
+                'market_buy_normalized_price' => $normalizedPrice,
+                'market_buy_normalized_size' => $normalizedSize,
+                'market_buy_normalized_notional' => $normalizedNotional,
+                'market_buy_submit_error' => [
+                    'message' => $e->getMessage(),
+                    'class' => $e::class,
+                ],
+            ]);
+            throw $e;
+        }
 
         $response = is_array($placed['response'] ?? null) ? $placed['response'] : [];
         $remoteOrderId = $this->extractRemoteOrderId($response);
-        $executedNotional = (string) ($order->remaining_notional ?? '0');
+        $executedNotional = $normalizedNotional;
 
         $order->market_buy_at = now();
         $order->market_buy_notional = $executedNotional;
@@ -236,6 +261,9 @@ class SkipRoundExecutionService
             'market_buy_response' => $response,
             'market_buy_remote_order_id' => $remoteOrderId,
             'market_price' => $marketPrice,
+            'market_buy_normalized_price' => $normalizedPrice,
+            'market_buy_normalized_size' => $normalizedSize,
+            'market_buy_normalized_notional' => $executedNotional,
         ]);
         $order->save();
 

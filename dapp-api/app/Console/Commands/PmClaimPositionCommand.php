@@ -303,9 +303,9 @@ class PmClaimPositionCommand extends Command
         $collateralCandidates = $isNegativeRisk
             ? ['']
             : array_values(array_unique(array_filter([
+                (string) config('pm.legacy_collateral_token', ''),
                 (string) config('pm.claim_collateral_token', ''),
                 (string) config('pm.collateral_token', ''),
-                (string) config('pm.legacy_collateral_token', ''),
             ])));
 
         foreach ($collateralCandidates as $collateralToken) {

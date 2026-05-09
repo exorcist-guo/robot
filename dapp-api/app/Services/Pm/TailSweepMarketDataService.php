@@ -68,9 +68,12 @@ class TailSweepMarketDataService
     {
         $store = $this->cacheStore();
         $cacheKey = $this->marketCacheKey($roundSlug);
-        $cached = $store->get($cacheKey);
-        if (is_array($cached) && $cached !== []) {
-            return $cached;
+        try {
+            $cached = $store->get($cacheKey);
+            if (is_array($cached) && $cached !== []) {
+                return $cached;
+            }
+        } catch (\Throwable) {
         }
 
         $market = $gammaClient->resolveTailSweepMarket($roundSlug);
@@ -78,11 +81,14 @@ class TailSweepMarketDataService
             throw new \RuntimeException("当前轮 market 为空: {$roundSlug}");
         }
 
-        $store->put(
-            $cacheKey,
-            $market,
-            now()->addSeconds(max(60, (int) config('pm.tail_sweep_market_cache_ttl_seconds', 1800)))
-        );
+        try {
+            $store->put(
+                $cacheKey,
+                $market,
+                now()->addSeconds(max(60, (int) config('pm.tail_sweep_market_cache_ttl_seconds', 1800)))
+            );
+        } catch (\Throwable) {
+        }
 
         return $market;
     }
@@ -130,9 +136,12 @@ class TailSweepMarketDataService
         }
 
         $cacheKey = 'pm:tail_sweep:start_price:'.md5($symbol.'|'.$startTime.'|'.$endTime);
-        $cached = Cache::get($cacheKey);
-        if (is_string($cached) && preg_match('/^\d+(\.\d+)?$/', $cached) && bccomp($cached, '0', 8) > 0) {
-            return $cached;
+        try {
+            $cached = Cache::get($cacheKey);
+            if (is_string($cached) && preg_match('/^\d+(\.\d+)?$/', $cached) && bccomp($cached, '0', 8) > 0) {
+                return $cached;
+            }
+        } catch (\Throwable) {
         }
 
         $eventStartTime = Carbon::createFromTimestamp((int) $startTime, 'UTC')->format('Y-m-d\TH:i:s\Z');
@@ -162,7 +171,10 @@ class TailSweepMarketDataService
 
         $price = trim((string) ($json['openPrice'] ?? ''));
         if (preg_match('/^\d+(\.\d+)?$/', $price) && bccomp($price, '0', 8) > 0) {
-            Cache::put($cacheKey, $price, now()->addMinutes(10));
+            try {
+                Cache::put($cacheKey, $price, now()->addMinutes(10));
+            } catch (\Throwable) {
+            }
 
             return $price;
         }

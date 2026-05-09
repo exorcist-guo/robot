@@ -262,34 +262,51 @@ class PmPreplaceNextRoundOrderCommand extends Command
 
 
     /**
-     * 重连 Redis，避免长时间运行后连接超时
+     * 每轮开始前主动断开并重建 Redis 连接，避免长时间常驻后拿到失效连接。
      */
     private function reconnectRedis(): void
     {
+        // 先处理 Cache 使用的 redis store。
         try {
-            // 测试 Cache Redis 连接是否正常（使用 ping 而不是 flush）
-            Cache::getStore()->getRedis()->ping();
-        } catch (\Throwable) {
-            // 如果 ping 失败，说明连接已断开，强制重建连接池
-            try {
-                $app = app();
-                $app->forgetInstance('cache');
-                $app->forgetInstance('cache.store');
-                Cache::purge();
-            } catch (\Throwable) {
-                // 忽略重建失败
+            $store = Cache::getStore();
+            if (method_exists($store, 'disconnect')) {
+                $store->disconnect();
             }
+        } catch (\Throwable) {
         }
 
         try {
-            // 测试 Redis Facade 连接是否正常
+            Cache::purge();
+        } catch (\Throwable) {
+        }
+
+        try {
+            $app = app();
+            $app->forgetInstance('cache');
+            $app->forgetInstance('cache.store');
+        } catch (\Throwable) {
+        }
+
+        // 再处理 Redis Facade 连接。
+        try {
+            \Illuminate\Support\Facades\Redis::connection()->disconnect();
+        } catch (\Throwable) {
+        }
+
+        try {
+            \Illuminate\Support\Facades\Redis::purge();
+        } catch (\Throwable) {
+        }
+
+        // 主动重新建连并 ping，一旦这里能成功，说明本轮拿到的是新连接。
+        try {
+            Cache::store()->get('pm:skip-round:redis:probe');
+        } catch (\Throwable) {
+        }
+
+        try {
             \Illuminate\Support\Facades\Redis::connection()->ping();
         } catch (\Throwable) {
-            try {
-                \Illuminate\Support\Facades\Redis::purge();
-            } catch (\Throwable) {
-                // 忽略重建失败
-            }
         }
     }
 }
