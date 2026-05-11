@@ -123,6 +123,12 @@ class SkipRoundPredictService
 
         $nextRoundStart = $targetBarTime;
         $nextRoundEnd = $nextRoundStart + $roundSpan;
+        if($payload['prob_up'] > 0.53 || $payload['prob_down'] < 0.47){
+            $predicted_side = $signal === 'UP' ? 'up' : 'down';
+        }else{
+            $predicted_side = $signal === 'UP' ? 'down' : 'up';
+        }
+
 
         return [
             'ok' => true,
@@ -139,7 +145,7 @@ class SkipRoundPredictService
             'predict_abs_diff' => (string) ($payload['predict_abs_diff'] ?? $payload['abs_diff'] ?? '0'),
             // 'predicted_side' => $signal === 'UP' ? 'up' : 'down',
 
-            'predicted_side' => $signal === 'UP' ? 'down' : 'up', // 注意：这里的信号是反向的，因为我们是根据当前轮的预测来下下一轮的单
+            'predicted_side' => $predicted_side,
             'predict_api_payload' => $payload,
         ];
     }
