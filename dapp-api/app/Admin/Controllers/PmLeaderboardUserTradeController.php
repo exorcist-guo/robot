@@ -15,7 +15,7 @@ class PmLeaderboardUserTradeController extends AdminController
     {
         return $content
             ->header('PmLeaderboardUserTrade 管理')
-            ->description('排行榜用户列表')
+            ->description('排行榜用户订单')
             ->breadcrumb(['text' => 'PmLeaderboardUserTrade 管理', 'url' => ''])
             ->body($this->grid());
     }
@@ -28,9 +28,9 @@ class PmLeaderboardUserTradeController extends AdminController
             $grid->column('id', 'ID')->sortable();
             $grid->column('leaderboard_user_id', '用户ID');
             $grid->column('leaderboardUser.address', '用户地址')->display(fn ($value) => self::maskAddress($value));
-            $grid->column('external_position_id', '外部记录ID')->limit(20);
+            // $grid->column('external_position_id', '外部记录ID')->limit(20);
             $grid->column('title', '标题')->limit(30);
-            $grid->column('slug', 'Slug')->limit(24);
+            // $grid->column('slug', 'Slug')->limit(24);
             $grid->column('outcome', 'Outcome');
             $grid->column('avg_price', '均价')->display(fn ($value) => self::formatPrice($value));
             $grid->column('price', '现价/收盘价')->display(fn ($value) => self::formatPrice($value));
@@ -38,7 +38,7 @@ class PmLeaderboardUserTradeController extends AdminController
             $grid->column('invested_amount_usdc', '投入')->display(fn ($value) => self::formatUsdc($value));
             $grid->column('pnl_amount_usdc', '盈亏')->display(fn ($value) => self::formatSignedUsdc($value));
             $grid->column('profit_amount_usdc', '盈利')->display(fn ($value) => self::formatUsdc($value));
-            $grid->column('loss_amount_usdc', '亏损')->display(fn ($value) => self::formatUsdc($value));
+            // $grid->column('loss_amount_usdc', '亏损')->display(fn ($value) => self::formatUsdc($value));
             $grid->column('is_win', '赢单')->bool();
             $grid->column('pnl_status', '盈亏状态')->label();
             $grid->column('pnl_ratio_bps', '收益率(BPS)');
