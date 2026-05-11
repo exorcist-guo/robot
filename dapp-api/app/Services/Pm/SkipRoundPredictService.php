@@ -137,7 +137,9 @@ class SkipRoundPredictService
             'remaining_seconds' => max(0, $now->diffInSeconds(Carbon::createFromTimestamp($currentRoundEnd), false)),
             'predict_diff' => (string) ($payload['predict_diff'] ?? $payload['diff'] ?? '0'),
             'predict_abs_diff' => (string) ($payload['predict_abs_diff'] ?? $payload['abs_diff'] ?? '0'),
-            'predicted_side' => $signal === 'UP' ? 'up' : 'down',
+            // 'predicted_side' => $signal === 'UP' ? 'up' : 'down',
+
+            'predicted_side' => $signal === 'UP' ? 'down' : 'up', // 注意：这里的信号是反向的，因为我们是根据当前轮的预测来下下一轮的单
             'predict_api_payload' => $payload,
         ];
     }
