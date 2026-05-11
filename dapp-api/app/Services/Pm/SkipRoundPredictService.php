@@ -123,11 +123,11 @@ class SkipRoundPredictService
 
         $nextRoundStart = $targetBarTime;
         $nextRoundEnd = $nextRoundStart + $roundSpan;
-        if($payload['prob_up'] > 0.53 || $payload['prob_down'] < 0.47){
+        // if($payload['prob_up'] > 0.53 || $payload['prob_down'] < 0.47){
             $predicted_side = $signal === 'UP' ? 'up' : 'down';
-        }else{
-            $predicted_side = $signal === 'UP' ? 'down' : 'up';
-        }
+        // }else{
+        //     $predicted_side = $signal === 'UP' ? 'down' : 'up';
+        // }
 
 
         return [
