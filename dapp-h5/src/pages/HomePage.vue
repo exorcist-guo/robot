@@ -486,7 +486,11 @@ onMounted(async () => {
 <style scoped>
 .portfolio-page {
   min-height: 100vh;
-  padding: 24px 14px calc(112px + var(--safe-bottom));
+  max-width: 520px;
+  margin: 0 auto;
+  padding: var(--page-y) var(--page-x) calc(var(--safe-bottom) + 24px);
+  box-sizing: border-box;
+  overflow-x: clip;
   background:
     radial-gradient(circle at top left, rgba(87, 103, 255, 0.16), transparent 26%),
     linear-gradient(180deg, #fbfbff 0%, #f2f4fb 36%, #eef1f7 100%);
