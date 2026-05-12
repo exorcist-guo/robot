@@ -8,6 +8,8 @@ return [
 
     // Polymarket 相关基础配置
     'gamma_base_url' => env('PM_GAMMA_BASE_URL', 'https://gamma-api.polymarket.com'),
+    'data_base_url' => env('PM_DATA_BASE_URL', 'https://data-api.polymarket.com'),
+    'user_pnl_base_url' => env('PM_USER_PNL_BASE_URL', 'https://user-pnl-api.polymarket.com'),
     'clob_base_url' => env('PM_CLOB_BASE_URL', 'https://clob.polymarket.com'),
     'http_timeout' => (int) env('PM_HTTP_TIMEOUT', 90),
     'http_connect_timeout' => (int) env('PM_HTTP_CONNECT_TIMEOUT', 15),

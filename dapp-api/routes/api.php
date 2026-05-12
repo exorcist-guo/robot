@@ -42,6 +42,13 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // markets
     Route::post('/markets/resolve', [MarketController::class, 'resolve']);
+    Route::get('/markets/public-profile', [MarketController::class, 'publicProfile']);
+    Route::get('/markets/activity', [MarketController::class, 'activity']);
+    Route::get('/markets/closed-positions', [MarketController::class, 'closedPositions']);
+    Route::get('/markets/user-pnl', [MarketController::class, 'userPnl']);
+    Route::get('/markets/user-stats', [MarketController::class, 'userStats']);
+    Route::get('/markets/value', [MarketController::class, 'userValue']);
+    Route::get('/markets/positions', [MarketController::class, 'positions']);
 
     // copy tasks
     Route::get('/copy-tasks', [CopyTaskController::class, 'index']);
@@ -74,5 +81,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // assets
     Route::get('/assets/positions', [AssetController::class, 'positions']);
+
+    //新增加三个api接口,并完成下面的链接的代理
 });
 

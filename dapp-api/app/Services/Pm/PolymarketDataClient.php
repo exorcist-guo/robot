@@ -13,9 +13,12 @@ class PolymarketDataClient
 
     public function __construct()
     {
+        $baseUrl = rtrim((string) config('pm.data_base_url', 'https://data-api.polymarket.com'), '/');
+
         $this->client = new Client([
-            'base_uri' => 'https://data-api.polymarket.com/',
-            'timeout' => 15,
+            'base_uri' => $baseUrl . '/',
+            'timeout' => (int) config('pm.http_timeout', 15),
+            'connect_timeout' => (int) config('pm.http_connect_timeout', 15),
         ]);
     }
 
@@ -170,6 +173,27 @@ class PolymarketDataClient
     /**
      * @return array<int, array<string,mixed>>
      */
+    public function getActivityByUser(string $user, int $limit = 30, int $offset = 0): array
+    {
+        $res = $this->client->get('activity', [
+            'query' => [
+                'user' => $user,
+                'limit' => $limit,
+                'offset' => $offset,
+            ],
+            'headers' => [
+                'User-Agent' => 'Mozilla/5.0',
+                'Accept' => 'application/json',
+            ],
+        ]);
+
+        $json = json_decode($res->getBody()->getContents(), true);
+        return is_array($json) ? array_values($json) : [];
+    }
+
+    /**
+     * @return array<int, array<string,mixed>>
+     */
     public function getClosedPositionsByUser(string $user, int $limit = 30, int $offset = 0): array
     {
         $res = $this->client->get('closed-positions', [
@@ -177,6 +201,91 @@ class PolymarketDataClient
                 'user' => $user,
                 'sortBy' => 'timestamp',
                 'sortDirection' => 'DESC',
+                'limit' => $limit,
+                'offset' => $offset,
+            ],
+            'headers' => [
+                'User-Agent' => 'Mozilla/5.0',
+                'Accept' => 'application/json',
+            ],
+        ]);
+
+        $json = json_decode($res->getBody()->getContents(), true);
+        return is_array($json) ? array_values($json) : [];
+    }
+
+    /**
+     * @return array<string,mixed>|array<int,mixed>
+     */
+    public function getUserPnl(string $userAddress, string $interval = '1m', string $fidelity = '18h'): array
+    {
+        $baseUrl = rtrim((string) config('pm.user_pnl_base_url', 'https://user-pnl-api.polymarket.com'), '/');
+
+        $res = $this->client->get($baseUrl . '/user-pnl', [
+            'query' => [
+                'user_address' => $userAddress,
+                'interval' => $interval,
+                'fidelity' => $fidelity,
+            ],
+            'headers' => [
+                'User-Agent' => 'Mozilla/5.0',
+                'Accept' => 'application/json',
+            ],
+        ]);
+
+        $json = json_decode($res->getBody()->getContents(), true);
+        return is_array($json) ? $json : [];
+    }
+
+    /**
+     * @return array<string,mixed>|array<int,mixed>
+     */
+    public function getUserStats(string $proxyAddress): array
+    {
+        $res = $this->client->get('v1/user-stats', [
+            'query' => [
+                'proxyAddress' => $proxyAddress,
+            ],
+            'headers' => [
+                'User-Agent' => 'Mozilla/5.0',
+                'Accept' => 'application/json',
+            ],
+        ]);
+
+        $json = json_decode($res->getBody()->getContents(), true);
+        return is_array($json) ? $json : [];
+    }
+
+    /**
+     * @return array<string,mixed>|array<int,mixed>
+     */
+    public function getUserValue(string $user): array
+    {
+        $res = $this->client->get('value', [
+            'query' => [
+                'user' => $user,
+            ],
+            'headers' => [
+                'User-Agent' => 'Mozilla/5.0',
+                'Accept' => 'application/json',
+            ],
+        ]);
+
+        $json = json_decode($res->getBody()->getContents(), true);
+        return is_array($json) ? $json : [];
+    }
+
+    /**
+     * @return array<int, array<string,mixed>>
+     */
+    public function getUserPositions(string $user, int $limit = 100, int $offset = 0): array
+    {
+        $res = $this->client->get('positions', [
+            'query' => [
+                'user' => $user,
+                'sortBy' => 'CURRENT',
+                'sortDirection' => 'DESC',
+                'sizeThreshold' => '.1',
                 'limit' => $limit,
                 'offset' => $offset,
             ],
