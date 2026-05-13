@@ -4,9 +4,11 @@ import { showConfirmDialog, showToast } from 'vant'
 import http from '../api/http'
 import { useAppStore } from '../stores/app'
 
+// 页面分段与持仓状态
 type Segment = 'holding' | 'records'
 type PositionStatus = 'active' | 'closed'
 
+// 顶部汇总数据
 type SummaryState = {
   holdingValue: string
   bestProfit: string
@@ -16,6 +18,7 @@ type SummaryState = {
   pnlPeriod: string
 }
 
+// 生效中持仓卡片
 type PositionItem = {
   key: string
   tokenId: string
@@ -32,6 +35,7 @@ type PositionItem = {
   tint: string
 }
 
+// 已结束持仓卡片
 type ClosedPositionItem = {
   key: string
   title: string
@@ -49,15 +53,19 @@ type ClosedPositionItem = {
   tint: string
 }
 
+// 交易记录卡片
 type ActivityItem = {
   key: string
   title: string
   subtitle: string
   value: string
   detail: string
+  shares: string
   positive: boolean
+  icon: string
 }
 
+// 页面基础状态
 const store = useAppStore()
 
 const profile = ref({
@@ -95,6 +103,7 @@ const closedPositions = ref<any[]>([])
 const activities = ref<any[]>([])
 const userAddress = ref('')
 
+// 格式化工具
 const findPeriodConfig = () => periodTabs.find(item => item.value === activePeriod.value) || periodTabs[0]
 
 const formatCurrency = (value: unknown) => {
@@ -141,8 +150,33 @@ const formatDateTime = (value: unknown) => {
   })
 }
 
+// 数据映射
 const toTitle = (item: any) => String(item?.title || item?.slug || item?.market || '未命名市场')
 const toSubtitle = (item: any) => String(item?.outcome || item?.side || '仓位')
+const formatChineseSide = (value: unknown) => {
+  const raw = String(value || '').trim()
+  const normalized = raw.toLowerCase()
+  const labels: Record<string, string> = {
+    buy: '买入',
+    sell: '卖出',
+    yes: '买涨',
+    no: '买跌',
+    up: '买涨',
+    down: '买跌',
+    long: '做多',
+    short: '做空',
+    trade: '交易',
+    split: '拆分',
+    merge: '合并',
+    redeem: '兑换',
+    reward: '奖励',
+    conversion: '转换',
+    maker_rebate: '做市返佣',
+    referral_reward: '邀请奖励',
+  }
+
+  return labels[normalized] || raw || '记录'
+}
 
 const tintOptions = ['emerald', 'blue', 'orange', 'gold', 'teal', 'rose'] as const
 const iconOptions = ['⚽', '🏀', '🎾', '⚾', '🏒', '📈']
@@ -197,19 +231,23 @@ const mapClosedPositionToCard = (item: any, index: number): ClosedPositionItem =
 const mapActivityToCard = (item: any, index: number): ActivityItem => {
   const title = String(item?.title || item?.slug || item?.marketTitle || '交易记录')
   const side = String(item?.side || item?.type || item?.outcome || '记录')
-  const size = Number(item?.size ?? item?.usdcSize ?? item?.size_usdc ?? item?.value ?? 0)
+  const size = Number(item?.size ?? item?.shares ?? item?.amount ?? 0)
+  const usdcSize = Number(item?.usdcSize ?? item?.size_usdc ?? item?.value ?? 0)
   const price = Number(item?.price ?? item?.curPrice ?? 0)
   const positive = side.toUpperCase().includes('BUY') || side === 'Yes'
   return {
     key: String(item?.id || item?.transactionHash || `${title}-${index}`),
     title,
-    subtitle: side,
-    value: formatCurrency(size && price ? size * price : size),
+    subtitle: formatChineseSide(side),
+    value: formatCurrency(usdcSize || (size && price ? size * price : 0)),
     detail: item?.timestamp ? new Date(Number(item.timestamp) * 1000).toLocaleString('zh-CN') : '最近成交',
+    shares: formatShare(size),
     positive,
+    icon: String(item?.icon || ''),
   }
 }
 
+// 列表计算
 const activePositionCards = computed(() => {
   const keyword = searchKeyword.value.trim().toLowerCase()
   return activePositions.value
@@ -232,6 +270,7 @@ const closedPositionCards = computed(() => {
 
 const activityCards = computed(() => activities.value.map((item, index) => mapActivityToCard(item, index)))
 
+// 图表与统计处理
 const chartPath = computed(() => {
   const points = trendPoints.value.length > 1 ? trendPoints.value : [0, 0, 0, 0, 0, 0]
   const width = 500
@@ -289,6 +328,7 @@ const normalizePnlSeries = (payload: any) => {
     .filter((value: number) => !Number.isNaN(value))
 }
 
+// 接口请求
 const resolveUserAddress = async () => {
   if (!store.me) {
     await store.fetchMe().catch(() => null)
@@ -375,6 +415,7 @@ const loadHomeData = async () => {
   }
 }
 
+// 页面交互
 const setPeriod = async (value: string) => {
   activePeriod.value = value
   await loadPnlData(userAddress.value)
@@ -413,7 +454,9 @@ onMounted(async () => {
 </script>
 
 <template>
+  <!-- 页面主体 -->
   <div class="portfolio-page">
+    <!-- 顶部用户信息 -->
     <header class="portfolio-hero">
       <div class="portfolio-profile">
         <div class="portfolio-avatar" :style="{ background: profile.avatarGradient }"></div>
@@ -431,6 +474,7 @@ onMounted(async () => {
       </div>
     </header>
 
+    <!-- 资产汇总 -->
     <section class="summary-strip surface-card">
       <div class="summary-item">
         <div class="summary-value">{{ summary.holdingValue }}</div>
@@ -446,6 +490,7 @@ onMounted(async () => {
       </div>
     </section>
 
+    <!-- 盈亏走势图 -->
     <section class="pnl-card glass-card">
       <div class="pnl-header">
         <div class="pnl-meta">
@@ -482,6 +527,7 @@ onMounted(async () => {
       </div>
     </section>
 
+    <!-- 持仓与交易记录切换 -->
     <section class="content-block">
       <div class="section-switcher">
         <button
@@ -505,11 +551,12 @@ onMounted(async () => {
       <div v-if="activeSegment === 'holding'" class="toolbar-row">
         <button type="button" class="toolbar-pill" :class="{ 'toolbar-pill--active': activeStatus === 'active' }" @click="activeStatus = 'active'">生效中</button>
         <button type="button" class="toolbar-pill" :class="{ 'toolbar-pill--active': activeStatus === 'closed' }" @click="activeStatus = 'closed'">已结束</button>
-        <button type="button" class="toolbar-pill toolbar-pill--sort">⇅ 价值</button>
+       
       </div>
 
     </section>
 
+    <!-- 生效中持仓列表 -->
     <section v-if="activeSegment === 'holding' && activeStatus === 'active'" class="position-list">
       <article v-for="item in activePositionCards" :key="item.key" class="position-card surface-card">
         <div class="position-card__left">
@@ -545,6 +592,7 @@ onMounted(async () => {
       </div>
     </section>
 
+    <!-- 已结束持仓列表 -->
     <section v-else-if="activeSegment === 'holding' && activeStatus === 'closed'" class="position-list">
       <article v-for="item in closedPositionCards" :key="item.key" class="position-card position-card--closed surface-card">
         <div class="position-card__left">
@@ -578,15 +626,20 @@ onMounted(async () => {
       </div>
     </section>
 
+    <!-- 交易记录列表 -->
     <section v-else class="position-list">
       <article v-for="item in activityCards" :key="item.key" class="position-card surface-card">
         <div class="position-card__left">
-          <div class="position-logo" :class="`position-logo--${item.positive ? 'emerald' : 'rose'}`">{{ item.positive ? '↗' : '↘' }}</div>
+          <div class="position-logo" :class="`position-logo--${item.positive ? 'emerald' : 'rose'}`">
+            <img v-if="item.icon" :src="item.icon" :alt="item.title" class="position-logo__image" />
+            <span v-else>{{ item.positive ? '↗' : '↘' }}</span>
+          </div>
           <div class="position-copy">
             <h3 class="position-title">{{ item.title }}</h3>
             <div class="position-meta">
               <span class="position-badge" :class="{ 'position-badge--negative': !item.positive }">{{ item.subtitle }}</span>
               <span class="position-shares">{{ item.detail }}</span>
+              <span class="position-shares">{{ item.shares }}</span>
             </div>
           </div>
         </div>
@@ -604,6 +657,7 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+/* 页面整体布局 */
 .portfolio-page {
   min-height: 100vh;
   max-width: 520px;
@@ -616,6 +670,7 @@ onMounted(async () => {
     linear-gradient(180deg, #fbfbff 0%, #f2f4fb 36%, #eef1f7 100%);
 }
 
+/* 顶部区域 */
 .portfolio-hero {
   display: flex;
   align-items: center;
@@ -660,6 +715,7 @@ onMounted(async () => {
   font-size: 18px;
 }
 
+/* 汇总卡片 */
 .summary-strip {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -696,6 +752,7 @@ onMounted(async () => {
   color: #6b7280;
 }
 
+/* 盈亏卡片与图表 */
 .pnl-card {
   padding: 18px 16px 16px;
   border-radius: 26px;
@@ -775,6 +832,7 @@ onMounted(async () => {
   display: block;
 }
 
+/* 内容切换与工具栏 */
 .content-block {
   margin-bottom: 14px;
 }
@@ -852,6 +910,7 @@ onMounted(async () => {
   font-size: 14px;
 }
 
+/* 列表卡片 */
 .position-list {
   display: grid;
   gap: 12px;
@@ -998,6 +1057,7 @@ onMounted(async () => {
   opacity: 0.62;
 }
 
+/* 空状态 */
 .empty-records {
   padding: 18px;
 }
