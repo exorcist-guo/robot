@@ -29,6 +29,23 @@ type PositionItem = {
   tint: string
 }
 
+type ClosedPositionItem = {
+  key: string
+  title: string
+  subtitle: string
+  openBadge: string
+  closeBadge: string
+  shares: string
+  invested: string
+  pnl: string
+  pnlValue: string
+  positive: boolean
+  closedAt: string
+  icon: string
+  logo: string
+  tint: string
+}
+
 type ActivityItem = {
   key: string
   title: string
@@ -107,6 +124,19 @@ const formatBadge = (value: unknown) => {
   return `${Math.round(numeric * 100)}¢`
 }
 
+const formatDateTime = (value: unknown) => {
+  if (!value) return '结束时间未知'
+  const numeric = Number(value)
+  const date = Number.isNaN(numeric) ? new Date(String(value)) : new Date(numeric * 1000)
+  if (Number.isNaN(date.getTime())) return '结束时间未知'
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
 const toTitle = (item: any) => String(item?.title || item?.slug || item?.market || '未命名市场')
 const toSubtitle = (item: any) => String(item?.outcome || item?.side || '仓位')
 
@@ -133,6 +163,31 @@ const mapPositionToCard = (item: any, index: number): PositionItem => {
   }
 }
 
+const mapClosedPositionToCard = (item: any, index: number): ClosedPositionItem => {
+  const pnlRaw = Number(item?.realizedPnl ?? item?.cashPnl ?? item?.pnl ?? 0)
+  const investedRaw = Number(item?.initialValue ?? item?.totalBoughtValue ?? 0)
+  const avgPrice = item?.avgPrice ?? item?.price ?? 0
+  const closePrice = item?.curPrice ?? item?.closePrice ?? 0
+  const percentRaw = investedRaw > 0 ? (pnlRaw / investedRaw) * 100 : Number(item?.percentPnl ?? item?.percentRealizedPnl ?? 0)
+
+  return {
+    key: String(item?.asset || item?.conditionId || item?.slug || item?.timestamp || index),
+    title: toTitle(item),
+    subtitle: toSubtitle(item),
+    openBadge: `买入 ${formatBadge(avgPrice)}`,
+    closeBadge: `结束 ${formatBadge(closePrice)}`,
+    shares: formatShare(item?.totalBought ?? item?.size ?? 0),
+    invested: formatCurrency(investedRaw || Number(avgPrice) * Number(item?.totalBought ?? item?.size ?? 0)),
+    pnl: `${formatCurrency(pnlRaw)} (${Number.isNaN(percentRaw) ? '0.00' : percentRaw.toFixed(2)}%)`,
+    pnlValue: formatCurrency(pnlRaw),
+    positive: pnlRaw >= 0,
+    closedAt: formatDateTime(item?.timestamp ?? item?.endDate),
+    icon: String(item?.icon || ''),
+    logo: pickLogo(index),
+    tint: pickTint(index),
+  }
+}
+
 const mapActivityToCard = (item: any, index: number): ActivityItem => {
   const title = String(item?.title || item?.slug || item?.marketTitle || '交易记录')
   const side = String(item?.side || item?.type || item?.outcome || '记录')
@@ -149,15 +204,24 @@ const mapActivityToCard = (item: any, index: number): ActivityItem => {
   }
 }
 
-const positionCards = computed(() => {
-  const source = activeStatus.value === 'active' ? activePositions.value : closedPositions.value
+const activePositionCards = computed(() => {
   const keyword = searchKeyword.value.trim().toLowerCase()
-  return source
+  return activePositions.value
     .filter(item => {
       if (!keyword) return true
       return `${toTitle(item)} ${toSubtitle(item)}`.toLowerCase().includes(keyword)
     })
     .map((item, index) => mapPositionToCard(item, index))
+})
+
+const closedPositionCards = computed(() => {
+  const keyword = searchKeyword.value.trim().toLowerCase()
+  return closedPositions.value
+    .filter(item => {
+      if (!keyword) return true
+      return `${toTitle(item)} ${toSubtitle(item)}`.toLowerCase().includes(keyword)
+    })
+    .map((item, index) => mapClosedPositionToCard(item, index))
 })
 
 const activityCards = computed(() => activities.value.map((item, index) => mapActivityToCard(item, index)))
@@ -180,27 +244,8 @@ const chartPath = computed(() => {
 })
 
 const extractBestProfit = (stats: any) => {
-  const candidates = [
-    stats?.bestProfit,
-    stats?.best_profit,
-    stats?.maxProfit,
-    stats?.max_profit,
-    stats?.largestProfit,
-    stats?.largest_profit,
-    stats?.totalProfit,
-    stats?.total_profit,
-    stats?.profit,
-    stats?.pnl,
-  ]
-
-  for (const candidate of candidates) {
-    const numeric = Number(candidate)
-    if (!Number.isNaN(numeric)) {
-      return numeric
-    }
-  }
-
-  return 0
+  const numeric = Number(stats?.largestWin)
+  return Number.isNaN(numeric) ? 0 : numeric
 }
 
 const extractPredictions = (stats: any) => {
@@ -269,7 +314,7 @@ const loadPnlData = async (address: string) => {
   const pnlPayload = data?.data?.pnl ?? []
   trendPoints.value = normalizePnlSeries(pnlPayload)
   const pnlSeries = trendPoints.value
-  const latestPnl = pnlSeries.length ? pnlSeries[pnlSeries.length - 1] : 0
+  const latestPnl = pnlSeries.length > 1 ? pnlSeries[pnlSeries.length - 1] - pnlSeries[0] : 0
 
   summary.value = {
     ...summary.value,
@@ -431,8 +476,8 @@ onMounted(async () => {
 
     </section>
 
-    <section v-if="activeSegment === 'holding'" class="position-list">
-      <article v-for="item in positionCards" :key="item.key" class="position-card surface-card">
+    <section v-if="activeSegment === 'holding' && activeStatus === 'active'" class="position-list">
+      <article v-for="item in activePositionCards" :key="item.key" class="position-card surface-card">
         <div class="position-card__left">
           <div class="position-logo" :class="`position-logo--${item.tint}`">
             <img v-if="item.icon" :src="item.icon" :alt="item.title" class="position-logo__image" />
@@ -452,9 +497,42 @@ onMounted(async () => {
         </div>
       </article>
 
-      <div v-if="!positionCards.length && !loading" class="empty-records surface-card">
-        <div class="empty-records__title">暂无持仓</div>
-        <p class="empty-records__text">当前条件下没有可展示的持仓数据。</p>
+      <div v-if="!activePositionCards.length && !loading" class="empty-records surface-card">
+        <div class="empty-records__title">暂无生效中持仓</div>
+        <p class="empty-records__text">当前没有可展示的生效中持仓数据。</p>
+      </div>
+    </section>
+
+    <section v-else-if="activeSegment === 'holding' && activeStatus === 'closed'" class="position-list">
+      <article v-for="item in closedPositionCards" :key="item.key" class="position-card position-card--closed surface-card">
+        <div class="position-card__left">
+          <div class="position-logo" :class="`position-logo--${item.tint}`">
+            <img v-if="item.icon" :src="item.icon" :alt="item.title" class="position-logo__image" />
+            <span v-else>{{ item.logo }}</span>
+          </div>
+          <div class="position-copy">
+            <h3 class="position-title">{{ item.title }}</h3>
+            <div class="position-meta">
+              <span class="position-badge" :class="{ 'position-badge--negative': !item.positive }">{{ item.subtitle }}</span>
+              <span class="position-shares">{{ item.closedAt }}</span>
+            </div>
+            <div class="closed-position-prices">
+              <span>{{ item.openBadge }}</span>
+              <span>{{ item.closeBadge }}</span>
+              <span>{{ item.shares }}</span>
+            </div>
+          </div>
+        </div>
+        <div class="position-card__right">
+          <div class="position-value">{{ item.pnlValue }}</div>
+          <div class="position-pnl" :class="{ 'position-pnl--negative': !item.positive }">{{ item.pnl }}</div>
+          <div class="position-shares">投入 {{ item.invested }}</div>
+        </div>
+      </article>
+
+      <div v-if="!closedPositionCards.length && !loading" class="empty-records surface-card">
+        <div class="empty-records__title">暂无已结束持仓</div>
+        <p class="empty-records__text">当前没有可展示的已结束持仓数据。</p>
       </div>
     </section>
 
@@ -745,6 +823,10 @@ onMounted(async () => {
   padding: 14px;
 }
 
+.position-card--closed {
+  background: linear-gradient(135deg, rgba(255,255,255,0.96), rgba(248,250,252,0.88));
+}
+
 .position-card__left {
   display: flex;
   gap: 12px;
@@ -818,6 +900,22 @@ onMounted(async () => {
 .position-shares {
   color: #9ca3af;
   font-size: 13px;
+}
+
+.closed-position-prices {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.closed-position-prices span {
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: rgba(241, 245, 249, 0.9);
 }
 
 .position-card__right {
