@@ -77,6 +77,9 @@ class Kernel extends ConsoleKernel
         // ->everyMinute()
         // ->withoutOverlapping();
 
+        $schedule->command('pm:claim-position --scan-all  --include-losing') ->dailyAt('02:20');
+
+
     }
 
     /**

@@ -353,14 +353,15 @@ const loadHomeData = async () => {
     ])
 
     const valuePayload = valueRes.data?.data?.value ?? {}
+    const valueSummary = Array.isArray(valuePayload) ? (valuePayload[0] ?? {}) : valuePayload
     const statsPayload = statsRes.data?.data?.stats ?? {}
 
-    activePositions.value = valuePayload?.positions ?? positionsRes.data?.data?.list ?? []
+    activePositions.value = valueSummary?.positions ?? positionsRes.data?.data?.list ?? []
     closedPositions.value = closedRes.data?.data?.list ?? []
     activities.value = activityRes.data?.data?.list ?? []
 
     summary.value = {
-      holdingValue: formatCurrency(valuePayload?.totalValue ?? valuePayload?.holdingValue ?? valuePayload?.value ?? 0),
+      holdingValue: formatCurrency(valueSummary?.value ?? 0),
       bestProfit: formatCurrency(extractBestProfit(statsPayload)),
       predictions: formatCompactNumber(extractPredictions(statsPayload)),
       pnlLabel: '盈亏',
