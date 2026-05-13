@@ -3,10 +3,15 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Pm\PmCustodyWallet;
+use App\Models\Pm\PmMember;
 use App\Services\Pm\EthSignature;
 use App\Services\Pm\GammaClient;
 use App\Services\Pm\PolymarketDataClient;
+use App\Services\Pm\PolymarketTradingService;
 use App\Traits\ApiResponseTrait;
+use Brick\Math\BigDecimal;
+use Brick\Math\RoundingMode;
 use Illuminate\Http\Request;
 
 class MarketController extends Controller
@@ -159,6 +164,90 @@ class MarketController extends Controller
         ]);
     }
 
+    public function sellPosition(Request $request, PolymarketTradingService $trading)
+    {
+        /** @var PmMember $member */
+        $member = $request->user();
+        $wallet = PmCustodyWallet::with('apiCredentials')
+            ->where('member_id', $member->id)
+            ->where('wallet_role', PmCustodyWallet::ROLE_MASTER)
+            ->first();
+
+        if (!$wallet) {
+            return $this->error('PM 托管钱包不存在，请重新登录后重试');
+        }
+
+        $tokenId = trim((string) $request->input('token_id', ''));
+        if ($tokenId === '' || preg_match('/^\d+$/', $tokenId) !== 1) {
+            return $this->error('无效的持仓 token');
+        }
+
+        try {
+            $book = $trading->getOrderBook($tokenId);
+            $quote = $trading->getOrderBookMarketPrice($tokenId, PolymarketTradingService::SIDE_SELL, '0', null, $book);
+            $executionPrice = (string) ($quote['price'] ?? '0');
+            if (bccomp($executionPrice, '0', 8) <= 0) {
+                return $this->error('当前没有可卖出的买盘深度');
+            }
+
+            $readiness = $trading->getTradingReadiness($wallet, PolymarketTradingService::SIDE_SELL, $tokenId);
+            if (($readiness['failure_code'] ?? null) === 'insufficient_position_allowance') {
+                $approveResult = $trading->approveForSide($wallet, PolymarketTradingService::SIDE_SELL, $tokenId);
+                return $this->success('卖出授权已提交，请稍后重试卖出', [
+                    'status' => 'approval_submitted',
+                    'approval' => $approveResult,
+                    'readiness' => $readiness,
+                ]);
+            }
+
+            if (($readiness['is_ready'] ?? false) !== true) {
+                return $this->error($this->mapSellReadinessMessage((string) ($readiness['failure_code'] ?? 'trade_not_ready')), [
+                    'readiness' => $readiness,
+                ]);
+            }
+
+            $balanceUnits = (string) ($readiness['balance'] ?? '0');
+            if (preg_match('/^\d+$/', $balanceUnits) !== 1 || bccomp($balanceUnits, '0', 0) <= 0) {
+                return $this->error('当前没有可卖出的持仓');
+            }
+
+            $size = BigDecimal::of($balanceUnits)->dividedBy('1000000', 2, RoundingMode::DOWN);
+            $consumableSize = (string) ($quote['consumable_size'] ?? '0');
+            if (preg_match('/^\d+(\.\d+)?$/', $consumableSize) === 1 && bccomp($consumableSize, '0', 8) > 0 && $size->isGreaterThan(BigDecimal::of($consumableSize))) {
+                $size = BigDecimal::of($consumableSize);
+            }
+
+            if ($size->isLessThanOrEqualTo(BigDecimal::zero())) {
+                return $this->error('当前没有可卖出的持仓');
+            }
+
+            $normalizedSize = $size->stripTrailingZeros()->__toString();
+            $normalizedPrice = BigDecimal::of($executionPrice)->toScale(4, RoundingMode::DOWN)->stripTrailingZeros()->__toString();
+            $order = $trading->placeOrder($wallet, [
+                'token_id' => $tokenId,
+                'market_id' => (string) $request->input('market_id', ''),
+                'outcome' => (string) $request->input('outcome', ''),
+                'side' => PolymarketTradingService::SIDE_SELL,
+                'price' => $normalizedPrice,
+                'size' => $normalizedSize,
+                'order_type' => 'GTC',
+                'defer_exec' => false,
+                'expiration' => '0',
+            ]);
+        } catch (\Throwable $e) {
+            return $this->error('卖出失败: ' . $e->getMessage());
+        }
+
+        return $this->success('卖出订单已提交', [
+            'status' => 'submitted',
+            'token_id' => $tokenId,
+            'price' => $normalizedPrice,
+            'size' => $normalizedSize,
+            'quote' => $quote,
+            'order' => $order,
+        ]);
+    }
+
     public function positions(Request $request, PolymarketDataClient $dataClient)
     {
         $user = $this->resolveAddress($request, 'user') ?? $this->resolveAddress($request, 'address');
@@ -181,6 +270,16 @@ class MarketController extends Controller
             'offset' => $offset,
             'list' => $list,
         ]);
+    }
+
+    private function mapSellReadinessMessage(string $reason): string
+    {
+        return match ($reason) {
+            'insufficient_position_balance' => '当前没有可卖出的持仓',
+            'insufficient_position_allowance' => '卖出授权不足，请先完成授权',
+            'missing_token_id' => '无效的持仓 token',
+            default => '当前持仓暂不可卖出',
+        };
     }
 
     private function resolveAddress(Request $request, string $key): ?string

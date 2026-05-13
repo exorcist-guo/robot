@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { showConfirmDialog, showToast } from 'vant'
 import http from '../api/http'
 import { useAppStore } from '../stores/app'
 
@@ -17,6 +18,8 @@ type SummaryState = {
 
 type PositionItem = {
   key: string
+  tokenId: string
+  marketId: string
   title: string
   subtitle: string
   badge: string
@@ -84,6 +87,7 @@ const activePeriod = ref('1D')
 const activeSegment = ref<Segment>('holding')
 const activeStatus = ref<PositionStatus>('active')
 const loading = ref(false)
+const sellingTokenId = ref('')
 const searchKeyword = ref('')
 const trendPoints = ref<number[]>([])
 const activePositions = ref<any[]>([])
@@ -150,6 +154,8 @@ const mapPositionToCard = (item: any, index: number): PositionItem => {
   const percentRaw = Number(item?.percentPnl ?? item?.roi ?? 0)
   return {
     key: String(item?.asset || item?.conditionId || item?.slug || index),
+    tokenId: String(item?.asset || item?.token_id || item?.tokenId || ''),
+    marketId: String(item?.conditionId || item?.market_id || item?.marketId || ''),
     title: toTitle(item),
     subtitle: toSubtitle(item),
     badge: formatBadge(item?.curPrice ?? item?.avgPrice ?? item?.price ?? 0),
@@ -373,6 +379,33 @@ const setPeriod = async (value: string) => {
   await loadPnlData(userAddress.value)
 }
 
+const sellPosition = async (item: PositionItem) => {
+  if (!item.tokenId || sellingTokenId.value) return
+
+  await showConfirmDialog({
+    title: '确认卖出全部持仓？',
+    message: `将按当前盘口卖出「${item.title}」的全部 ${item.subtitle} 持仓。`,
+    confirmButtonText: '确认卖出',
+    cancelButtonText: '取消',
+    confirmButtonColor: '#ef4444',
+  })
+
+  sellingTokenId.value = item.tokenId
+  try {
+    const { data } = await http.post('/markets/positions/sell', {
+      token_id: item.tokenId,
+      market_id: item.marketId,
+      outcome: item.subtitle,
+    })
+    showToast(data?.msg || '卖出订单已提交')
+    await loadHomeData()
+  } catch (error: any) {
+    showToast(error?.message || '卖出失败')
+  } finally {
+    sellingTokenId.value = ''
+  }
+}
+
 onMounted(async () => {
   await loadHomeData()
 })
@@ -494,6 +527,14 @@ onMounted(async () => {
         <div class="position-card__right">
           <div class="position-value">{{ item.value }}</div>
           <div class="position-pnl" :class="{ 'position-pnl--negative': !item.positive }">{{ item.pnl }}</div>
+          <button
+            type="button"
+            class="sell-position-button"
+            :disabled="sellingTokenId === item.tokenId"
+            @click="sellPosition(item)"
+          >
+            {{ sellingTokenId === item.tokenId ? '卖出中' : '卖出' }}
+          </button>
         </div>
       </article>
 
@@ -938,6 +979,22 @@ onMounted(async () => {
 
 .position-pnl--negative {
   color: #ef4444;
+}
+
+.sell-position-button {
+  margin-top: 10px;
+  border: 0;
+  border-radius: 999px;
+  padding: 7px 12px;
+  background: #fee2e2;
+  color: #dc2626;
+  font-size: 12px;
+  font-weight: 800;
+  box-shadow: 0 8px 18px rgba(239, 68, 68, 0.12);
+}
+
+.sell-position-button:disabled {
+  opacity: 0.62;
 }
 
 .empty-records {
