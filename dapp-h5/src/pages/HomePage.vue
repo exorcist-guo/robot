@@ -529,31 +529,32 @@ onMounted(async () => {
 
     <!-- 持仓与交易记录切换 -->
     <section class="content-block">
-      <div class="section-switcher">
+      <div class="toolbar-row">
         <button
           type="button"
-          class="section-switcher__tab"
-          :class="{ 'section-switcher__tab--active': activeSegment === 'holding' }"
-          @click="activeSegment = 'holding'"
+          class="toolbar-pill"
+          :class="{ 'toolbar-pill--active': activeSegment === 'holding' && activeStatus === 'active' }"
+          @click="activeSegment = 'holding'; activeStatus = 'active'"
         >
-          持仓
+          生效中
         </button>
         <button
           type="button"
-          class="section-switcher__tab"
-          :class="{ 'section-switcher__tab--active': activeSegment === 'records' }"
+          class="toolbar-pill"
+          :class="{ 'toolbar-pill--active': activeSegment === 'holding' && activeStatus === 'closed' }"
+          @click="activeSegment = 'holding'; activeStatus = 'closed'"
+        >
+          已结束
+        </button>
+        <button
+          type="button"
+          class="toolbar-pill"
+          :class="{ 'toolbar-pill--active': activeSegment === 'records' }"
           @click="activeSegment = 'records'"
         >
           交易记录
         </button>
       </div>
-
-      <div v-if="activeSegment === 'holding'" class="toolbar-row">
-        <button type="button" class="toolbar-pill" :class="{ 'toolbar-pill--active': activeStatus === 'active' }" @click="activeStatus = 'active'">生效中</button>
-        <button type="button" class="toolbar-pill" :class="{ 'toolbar-pill--active': activeStatus === 'closed' }" @click="activeStatus = 'closed'">已结束</button>
-       
-      </div>
-
     </section>
 
     <!-- 生效中持仓列表 -->
