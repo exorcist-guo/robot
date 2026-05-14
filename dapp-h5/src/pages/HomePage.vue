@@ -18,6 +18,14 @@ type SummaryState = {
   pnlPeriod: string
 }
 
+type PagedState = {
+  loading: boolean
+  finished: boolean
+  initialized: boolean
+  offset: number
+  limit: number
+}
+
 // 生效中持仓卡片
 type PositionItem = {
   key: string
@@ -94,7 +102,6 @@ const periodTabs = [
 const activePeriod = ref('1D')
 const activeSegment = ref<Segment>('holding')
 const activeStatus = ref<PositionStatus>('active')
-const loading = ref(false)
 const sellingTokenId = ref('')
 const searchKeyword = ref('')
 const trendPoints = ref<number[]>([])
@@ -102,6 +109,25 @@ const activePositions = ref<any[]>([])
 const closedPositions = ref<any[]>([])
 const activities = ref<any[]>([])
 const userAddress = ref('')
+
+const createPagedState = (limit = 30): PagedState => ({
+  loading: false,
+  finished: false,
+  initialized: false,
+  offset: 0,
+  limit,
+})
+
+const activePaging = ref<PagedState>(createPagedState())
+const closedPaging = ref<PagedState>(createPagedState())
+const activityPaging = ref<PagedState>(createPagedState())
+
+let summaryValueRequestId = 0
+let statsRequestId = 0
+let pnlRequestId = 0
+let activeRequestId = 0
+let closedRequestId = 0
+let activityRequestId = 0
 
 // 格式化工具
 const findPeriodConfig = () => periodTabs.find(item => item.value === activePeriod.value) || periodTabs[0]
@@ -278,14 +304,33 @@ const chartPath = computed(() => {
   const min = Math.min(...points)
   const max = Math.max(...points)
   const range = max - min || 1
+  const coordinates = points.map((point, index) => ({
+    x: (index / Math.max(points.length - 1, 1)) * (width - 8) + 4,
+    y: height - ((point - min) / range) * (height - 24) - 12,
+  }))
 
-  return points
-    .map((point, index) => {
-      const x = (index / Math.max(points.length - 1, 1)) * (width - 8) + 4
-      const y = height - ((point - min) / range) * (height - 24) - 12
-      return `${index === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`
-    })
-    .join(' ')
+  if (coordinates.length < 3) {
+    return coordinates
+      .map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`)
+      .join(' ')
+  }
+
+  const lastIndex = coordinates.length - 1
+  let path = `M ${coordinates[0].x.toFixed(2)} ${coordinates[0].y.toFixed(2)}`
+
+  for (let index = 1; index < lastIndex; index++) {
+    const current = coordinates[index]
+    const next = coordinates[index + 1]
+    const midX = (current.x + next.x) / 2
+    const midY = (current.y + next.y) / 2
+    path += ` Q ${current.x.toFixed(2)} ${current.y.toFixed(2)} ${midX.toFixed(2)} ${midY.toFixed(2)}`
+  }
+
+  const lastControl = coordinates[lastIndex - 1]
+  const lastPoint = coordinates[lastIndex]
+  path += ` Q ${lastControl.x.toFixed(2)} ${lastControl.y.toFixed(2)} ${lastPoint.x.toFixed(2)} ${lastPoint.y.toFixed(2)}`
+
+  return path
 })
 
 const extractBestProfit = (stats: any) => {
@@ -337,7 +382,56 @@ const resolveUserAddress = async () => {
   return String(me?.wallet?.signer_address || me?.address || '').toLowerCase()
 }
 
+const resetPagedState = (state: PagedState) => {
+  state.loading = false
+  state.finished = false
+  state.initialized = false
+  state.offset = 0
+}
+
+const mergeUniqueItems = (current: any[], incoming: any[], resolver: (item: any, index: number) => string) => {
+  const map = new Map<string, any>()
+  current.forEach((item, index) => {
+    map.set(resolver(item, index), item)
+  })
+  incoming.forEach((item, index) => {
+    map.set(resolver(item, current.length + index), item)
+  })
+  return Array.from(map.values())
+}
+
+const activeKeyResolver = (item: any, index: number) => String(item?.asset || item?.conditionId || item?.slug || `active-${index}`)
+const closedKeyResolver = (item: any, index: number) => String(item?.asset || item?.conditionId || item?.timestamp || item?.slug || `closed-${index}`)
+const activityKeyResolver = (item: any, index: number) => String(item?.id || item?.transactionHash || `${item?.title || item?.slug || 'activity'}-${index}`)
+
+const loadSummaryValue = async (address: string) => {
+  const requestId = ++summaryValueRequestId
+  const { data } = await http.get('/markets/value', { params: { user: address } })
+  if (requestId !== summaryValueRequestId) return
+
+  const valuePayload = data?.data?.value ?? {}
+  const valueSummary = Array.isArray(valuePayload) ? (valuePayload[0] ?? {}) : valuePayload
+  summary.value = {
+    ...summary.value,
+    holdingValue: formatCurrency(valueSummary?.value ?? 0),
+  }
+}
+
+const loadUserStats = async (address: string) => {
+  const requestId = ++statsRequestId
+  const { data } = await http.get('/markets/user-stats', { params: { address } })
+  if (requestId !== statsRequestId) return
+
+  const statsPayload = data?.data?.stats ?? {}
+  summary.value = {
+    ...summary.value,
+    bestProfit: formatCurrency(extractBestProfit(statsPayload)),
+    predictions: formatCompactNumber(extractPredictions(statsPayload)),
+  }
+}
+
 const loadPnlData = async (address: string) => {
+  const requestId = ++pnlRequestId
   if (!address) {
     trendPoints.value = []
     summary.value = {
@@ -357,6 +451,8 @@ const loadPnlData = async (address: string) => {
     },
   })
 
+  if (requestId !== pnlRequestId) return
+
   const pnlPayload = data?.data?.pnl ?? []
   trendPoints.value = normalizePnlSeries(pnlPayload)
   const pnlSeries = trendPoints.value
@@ -369,56 +465,152 @@ const loadPnlData = async (address: string) => {
   }
 }
 
-const loadHomeData = async () => {
-  loading.value = true
-  try {
-    const address = await resolveUserAddress()
-    userAddress.value = address
+const loadActivePositions = async (reset = false) => {
+  if (!userAddress.value) return
+  const state = activePaging.value
+  if (state.loading || (!reset && state.finished)) return
 
-    if (!address) {
-      return
-    }
-
-    profile.value = {
-      ...profile.value,
-      name: String(store.me?.nickname || store.me?.address || 'Anon'),
-    }
-
-    const [valueRes, statsRes, positionsRes, closedRes, activityRes] = await Promise.all([
-      http.get('/markets/value', { params: { user: address } }),
-      http.get('/markets/user-stats', { params: { address } }),
-      http.get('/markets/positions', { params: { user: address, limit: 30, offset: 0 } }),
-      http.get('/markets/closed-positions', { params: { user: address, limit: 30, offset: 0 } }),
-      http.get('/markets/activity', { params: { user: address, limit: 30, offset: 0 } }),
-    ])
-
-    const valuePayload = valueRes.data?.data?.value ?? {}
-    const valueSummary = Array.isArray(valuePayload) ? (valuePayload[0] ?? {}) : valuePayload
-    const statsPayload = statsRes.data?.data?.stats ?? {}
-
-    activePositions.value = valueSummary?.positions ?? positionsRes.data?.data?.list ?? []
-    closedPositions.value = closedRes.data?.data?.list ?? []
-    activities.value = activityRes.data?.data?.list ?? []
-
-    summary.value = {
-      holdingValue: formatCurrency(valueSummary?.value ?? 0),
-      bestProfit: formatCurrency(extractBestProfit(statsPayload)),
-      predictions: formatCompactNumber(extractPredictions(statsPayload)),
-      pnlLabel: '盈亏',
-      pnlValue: '$0.00',
-      pnlPeriod: activePeriod.value === '1D' ? '过去 24 小时' : '区间盈亏走势',
-    }
-
-    await loadPnlData(address)
-  } finally {
-    loading.value = false
+  const requestId = ++activeRequestId
+  if (reset) {
+    activePositions.value = []
+    resetPagedState(state)
   }
+
+  state.loading = true
+  try {
+    const { data } = await http.get('/markets/positions', {
+      params: { user: userAddress.value, limit: state.limit, offset: reset ? 0 : state.offset },
+    })
+    if (requestId !== activeRequestId) return
+
+    const incoming = Array.isArray(data?.data?.list) ? data.data.list : []
+    const previousLength = activePositions.value.length
+    activePositions.value = reset
+      ? incoming
+      : mergeUniqueItems(activePositions.value, incoming, activeKeyResolver)
+    state.initialized = true
+    state.offset = activePositions.value.length
+    state.finished = incoming.length < state.limit || (!reset && incoming.length > 0 && activePositions.value.length === previousLength)
+  } finally {
+    state.loading = false
+  }
+}
+
+const loadClosedPositions = async (reset = false) => {
+  if (!userAddress.value) return
+  const state = closedPaging.value
+  if (state.loading || (!reset && state.finished)) return
+
+  const requestId = ++closedRequestId
+  if (reset) {
+    closedPositions.value = []
+    resetPagedState(state)
+  }
+
+  state.loading = true
+  try {
+    const { data } = await http.get('/markets/closed-positions', {
+      params: { user: userAddress.value, limit: state.limit, offset: reset ? 0 : state.offset },
+    })
+    if (requestId !== closedRequestId) return
+
+    const incoming = Array.isArray(data?.data?.list) ? data.data.list : []
+    const previousLength = closedPositions.value.length
+    closedPositions.value = reset
+      ? incoming
+      : mergeUniqueItems(closedPositions.value, incoming, closedKeyResolver)
+    state.initialized = true
+    state.offset = closedPositions.value.length
+    state.finished = incoming.length < state.limit || (!reset && incoming.length > 0 && closedPositions.value.length === previousLength)
+  } finally {
+    state.loading = false
+  }
+}
+
+const loadActivities = async (reset = false) => {
+  if (!userAddress.value) return
+  const state = activityPaging.value
+  if (state.loading || (!reset && state.finished)) return
+
+  const requestId = ++activityRequestId
+  if (reset) {
+    activities.value = []
+    resetPagedState(state)
+  }
+
+  state.loading = true
+  try {
+    const { data } = await http.get('/markets/activity', {
+      params: { user: userAddress.value, limit: state.limit, offset: reset ? 0 : state.offset },
+    })
+    if (requestId !== activityRequestId) return
+
+    const incoming = Array.isArray(data?.data?.list) ? data.data.list : []
+    const previousLength = activities.value.length
+    activities.value = reset
+      ? incoming
+      : mergeUniqueItems(activities.value, incoming, activityKeyResolver)
+    state.initialized = true
+    state.offset = activities.value.length
+    state.finished = incoming.length < state.limit || (!reset && incoming.length > 0 && activities.value.length === previousLength)
+  } finally {
+    state.loading = false
+  }
+}
+
+const loadHomeData = async () => {
+  const address = await resolveUserAddress()
+  userAddress.value = address
+
+  if (!address) {
+    return
+  }
+
+  profile.value = {
+    ...profile.value,
+    name: String(store.me?.nickname || store.me?.address || 'Anon'),
+  }
+
+  summary.value = {
+    ...summary.value,
+    holdingValue: '$0.00',
+    bestProfit: '$0.00',
+    predictions: '0',
+  }
+
+  loadSummaryValue(address).catch(() => null)
+  loadUserStats(address).catch(() => null)
+  loadPnlData(address).catch(() => null)
+  await loadActivePositions(true)
 }
 
 // 页面交互
 const setPeriod = async (value: string) => {
   activePeriod.value = value
   await loadPnlData(userAddress.value)
+}
+
+const switchToActiveTab = async () => {
+  activeSegment.value = 'holding'
+  activeStatus.value = 'active'
+  if (!activePaging.value.initialized) {
+    await loadActivePositions(true)
+  }
+}
+
+const switchToClosedTab = async () => {
+  activeSegment.value = 'holding'
+  activeStatus.value = 'closed'
+  if (!closedPaging.value.initialized) {
+    await loadClosedPositions(true)
+  }
+}
+
+const switchToRecordsTab = async () => {
+  activeSegment.value = 'records'
+  if (!activityPaging.value.initialized) {
+    await loadActivities(true)
+  }
 }
 
 const sellPosition = async (item: PositionItem) => {
@@ -440,7 +632,14 @@ const sellPosition = async (item: PositionItem) => {
       outcome: item.subtitle,
     })
     showToast(data?.msg || '卖出订单已提交')
-    await loadHomeData()
+    await Promise.all([
+      loadSummaryValue(userAddress.value),
+      loadUserStats(userAddress.value),
+      loadPnlData(userAddress.value),
+      loadActivePositions(true),
+      closedPaging.value.initialized ? loadClosedPositions(true) : Promise.resolve(),
+      activityPaging.value.initialized ? loadActivities(true) : Promise.resolve(),
+    ])
   } catch (error: any) {
     showToast(error?.message || '卖出失败')
   } finally {
@@ -534,7 +733,7 @@ onMounted(async () => {
           type="button"
           class="toolbar-pill"
           :class="{ 'toolbar-pill--active': activeSegment === 'holding' && activeStatus === 'active' }"
-          @click="activeSegment = 'holding'; activeStatus = 'active'"
+          @click="switchToActiveTab"
         >
           生效中
         </button>
@@ -542,7 +741,7 @@ onMounted(async () => {
           type="button"
           class="toolbar-pill"
           :class="{ 'toolbar-pill--active': activeSegment === 'holding' && activeStatus === 'closed' }"
-          @click="activeSegment = 'holding'; activeStatus = 'closed'"
+          @click="switchToClosedTab"
         >
           已结束
         </button>
@@ -550,7 +749,7 @@ onMounted(async () => {
           type="button"
           class="toolbar-pill"
           :class="{ 'toolbar-pill--active': activeSegment === 'records' }"
-          @click="activeSegment = 'records'"
+          @click="switchToRecordsTab"
         >
           交易记录
         </button>
@@ -559,35 +758,37 @@ onMounted(async () => {
 
     <!-- 生效中持仓列表 -->
     <section v-if="activeSegment === 'holding' && activeStatus === 'active'" class="position-list">
-      <article v-for="item in activePositionCards" :key="item.key" class="position-card surface-card">
-        <div class="position-card__left">
-          <div class="position-logo" :class="`position-logo--${item.tint}`">
-            <img v-if="item.icon" :src="item.icon" :alt="item.title" class="position-logo__image" />
-            <span v-else>{{ item.logo }}</span>
-          </div>
-          <div class="position-copy">
-            <h3 class="position-title">{{ item.title }}</h3>
-            <div class="position-meta">
-              <span class="position-badge" :class="{ 'position-badge--negative': !item.positive }">{{ item.subtitle }} {{ item.badge }}</span>
-              <span class="position-shares">{{ item.shares }}</span>
+      <van-list :loading="activePaging.loading" :finished="activePaging.finished" finished-text="没有更多生效中持仓了" @load="loadActivePositions(false)">
+        <article v-for="item in activePositionCards" :key="item.key" class="position-card surface-card">
+          <div class="position-card__left">
+            <div class="position-logo" :class="`position-logo--${item.tint}`">
+              <img v-if="item.icon" :src="item.icon" :alt="item.title" class="position-logo__image" />
+              <span v-else>{{ item.logo }}</span>
+            </div>
+            <div class="position-copy">
+              <h3 class="position-title">{{ item.title }}</h3>
+              <div class="position-meta">
+                <span class="position-badge" :class="{ 'position-badge--negative': !item.positive }">{{ item.subtitle }} {{ item.badge }}</span>
+                <span class="position-shares">{{ item.shares }}</span>
+              </div>
             </div>
           </div>
-        </div>
-        <div class="position-card__right">
-          <div class="position-value">{{ item.value }}</div>
-          <div class="position-pnl" :class="{ 'position-pnl--negative': !item.positive }">{{ item.pnl }}</div>
-          <button
-            type="button"
-            class="sell-position-button"
-            :disabled="sellingTokenId === item.tokenId"
-            @click="sellPosition(item)"
-          >
-            {{ sellingTokenId === item.tokenId ? '卖出中' : '卖出' }}
-          </button>
-        </div>
-      </article>
+          <div class="position-card__right">
+            <div class="position-value">{{ item.value }}</div>
+            <div class="position-pnl" :class="{ 'position-pnl--negative': !item.positive }">{{ item.pnl }}</div>
+            <button
+              type="button"
+              class="sell-position-button"
+              :disabled="sellingTokenId === item.tokenId"
+              @click="sellPosition(item)"
+            >
+              {{ sellingTokenId === item.tokenId ? '卖出中' : '卖出' }}
+            </button>
+          </div>
+        </article>
+      </van-list>
 
-      <div v-if="!activePositionCards.length && !loading" class="empty-records surface-card">
+      <div v-if="activePaging.initialized && !activePositionCards.length && !activePaging.loading" class="empty-records surface-card">
         <div class="empty-records__title">暂无生效中持仓</div>
         <p class="empty-records__text">当前没有可展示的生效中持仓数据。</p>
       </div>
@@ -595,33 +796,35 @@ onMounted(async () => {
 
     <!-- 已结束持仓列表 -->
     <section v-else-if="activeSegment === 'holding' && activeStatus === 'closed'" class="position-list">
-      <article v-for="item in closedPositionCards" :key="item.key" class="position-card position-card--closed surface-card">
-        <div class="position-card__left">
-          <div class="position-logo" :class="`position-logo--${item.tint}`">
-            <img v-if="item.icon" :src="item.icon" :alt="item.title" class="position-logo__image" />
-            <span v-else>{{ item.logo }}</span>
-          </div>
-          <div class="position-copy">
-            <h3 class="position-title">{{ item.title }}</h3>
-            <div class="position-meta">
-              <span class="position-badge" :class="{ 'position-badge--negative': !item.positive }">{{ item.subtitle }}</span>
-              <span class="position-shares">{{ item.closedAt }}</span>
+      <van-list :loading="closedPaging.loading" :finished="closedPaging.finished" finished-text="没有更多已结束持仓了" @load="loadClosedPositions(false)">
+        <article v-for="item in closedPositionCards" :key="item.key" class="position-card position-card--closed surface-card">
+          <div class="position-card__left">
+            <div class="position-logo" :class="`position-logo--${item.tint}`">
+              <img v-if="item.icon" :src="item.icon" :alt="item.title" class="position-logo__image" />
+              <span v-else>{{ item.logo }}</span>
             </div>
-            <div class="closed-position-prices">
-              <span>{{ item.openBadge }}</span>
-              <span>{{ item.closeBadge }}</span>
-              <span>{{ item.shares }}</span>
+            <div class="position-copy">
+              <h3 class="position-title">{{ item.title }}</h3>
+              <div class="position-meta">
+                <span class="position-badge" :class="{ 'position-badge--negative': !item.positive }">{{ item.subtitle }}</span>
+                <span class="position-shares">{{ item.closedAt }}</span>
+              </div>
+              <div class="closed-position-prices">
+                <span>{{ item.openBadge }}</span>
+                <span>{{ item.closeBadge }}</span>
+                <span>{{ item.shares }}</span>
+              </div>
             </div>
           </div>
-        </div>
-        <div class="position-card__right">
-          <div class="position-value">{{ item.pnlValue }}</div>
-          <div class="position-pnl" :class="{ 'position-pnl--negative': !item.positive }">{{ item.pnl }}</div>
-          <div class="position-shares">投入 {{ item.invested }}</div>
-        </div>
-      </article>
+          <div class="position-card__right">
+            <div class="position-value">{{ item.pnlValue }}</div>
+            <div class="position-pnl" :class="{ 'position-pnl--negative': !item.positive }">{{ item.pnl }}</div>
+            <div class="position-shares">投入 {{ item.invested }}</div>
+          </div>
+        </article>
+      </van-list>
 
-      <div v-if="!closedPositionCards.length && !loading" class="empty-records surface-card">
+      <div v-if="closedPaging.initialized && !closedPositionCards.length && !closedPaging.loading" class="empty-records surface-card">
         <div class="empty-records__title">暂无已结束持仓</div>
         <p class="empty-records__text">当前没有可展示的已结束持仓数据。</p>
       </div>
@@ -629,27 +832,29 @@ onMounted(async () => {
 
     <!-- 交易记录列表 -->
     <section v-else class="position-list">
-      <article v-for="item in activityCards" :key="item.key" class="position-card surface-card">
-        <div class="position-card__left">
-          <div class="position-logo" :class="`position-logo--${item.positive ? 'emerald' : 'rose'}`">
-            <img v-if="item.icon" :src="item.icon" :alt="item.title" class="position-logo__image" />
-            <span v-else>{{ item.positive ? '↗' : '↘' }}</span>
-          </div>
-          <div class="position-copy">
-            <h3 class="position-title">{{ item.title }}</h3>
-            <div class="position-meta">
-              <span class="position-badge" :class="{ 'position-badge--negative': !item.positive }">{{ item.subtitle }}</span>
-              <span class="position-shares">{{ item.detail }}</span>
-              <span class="position-shares">{{ item.shares }}</span>
+      <van-list :loading="activityPaging.loading" :finished="activityPaging.finished" finished-text="没有更多交易记录了" @load="loadActivities(false)">
+        <article v-for="item in activityCards" :key="item.key" class="position-card surface-card">
+          <div class="position-card__left">
+            <div class="position-logo" :class="`position-logo--${item.positive ? 'emerald' : 'rose'}`">
+              <img v-if="item.icon" :src="item.icon" :alt="item.title" class="position-logo__image" />
+              <span v-else>{{ item.positive ? '↗' : '↘' }}</span>
+            </div>
+            <div class="position-copy">
+              <h3 class="position-title">{{ item.title }}</h3>
+              <div class="position-meta">
+                <span class="position-badge" :class="{ 'position-badge--negative': !item.positive }">{{ item.subtitle }}</span>
+                <span class="position-shares">{{ item.detail }}</span>
+                <span class="position-shares">{{ item.shares }}</span>
+              </div>
             </div>
           </div>
-        </div>
-        <div class="position-card__right">
-          <div class="position-value">{{ item.value }}</div>
-        </div>
-      </article>
+          <div class="position-card__right">
+            <div class="position-value">{{ item.value }}</div>
+          </div>
+        </article>
+      </van-list>
 
-      <div v-if="!activityCards.length && !loading" class="empty-records surface-card">
+      <div v-if="activityPaging.initialized && !activityCards.length && !activityPaging.loading" class="empty-records surface-card">
         <div class="empty-records__title">暂无交易记录</div>
         <p class="empty-records__text">当前没有可展示的活动数据。</p>
       </div>
