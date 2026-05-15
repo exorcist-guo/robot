@@ -164,6 +164,69 @@ class MarketController extends Controller
         ]);
     }
 
+    public function leaderboard(Request $request, PolymarketDataClient $dataClient)
+    {
+        $allowedCategories = ['OVERALL', 'POLITICS', 'SPORTS', 'CRYPTO', 'CULTURE', 'MENTIONS', 'WEATHER', 'ECONOMICS', 'TECH', 'FINANCE'];
+        $allowedTimePeriods = ['DAY', 'WEEK', 'MONTH', 'ALL'];
+        $allowedOrderBy = ['PNL', 'VOL'];
+
+        $category = strtoupper(trim((string) $request->query('category', 'OVERALL')));
+        $timePeriod = strtoupper(trim((string) $request->query('timePeriod', 'DAY')));
+        $orderBy = strtoupper(trim((string) $request->query('orderBy', 'PNL')));
+        $limit = min(50, max(1, (int) $request->query('limit', 25)));
+        $offset = min(1000, max(0, (int) $request->query('offset', 0)));
+        $user = $this->resolveAddress($request, 'user');
+        $userName = trim((string) $request->query('userName', ''));
+
+        if (!in_array($category, $allowedCategories, true)) {
+            return $this->error('无效的分类参数');
+        }
+        if (!in_array($timePeriod, $allowedTimePeriods, true)) {
+            return $this->error('无效的时间参数');
+        }
+        if (!in_array($orderBy, $allowedOrderBy, true)) {
+            return $this->error('无效的排序参数');
+        }
+        if ($request->query('user') !== null && $user === null) {
+            return $this->error('无效的钱包地址');
+        }
+
+        $params = [
+            'category' => $category,
+            'timePeriod' => $timePeriod,
+            'orderBy' => $orderBy,
+            'limit' => $limit,
+            'offset' => $offset,
+        ];
+        if ($user !== null) {
+            $params['user'] = $user;
+        }
+        if ($userName !== '') {
+            $params['userName'] = $userName;
+        }
+
+        try {
+            $list = $dataClient->getLeaderboardV1($params);
+            $normalized = array_map(
+                fn (array $entry) => $dataClient->normalizeLeaderboardEntryV1($entry, $timePeriod, $orderBy),
+                $list
+            );
+        } catch (\Throwable) {
+            return $this->error('获取排行榜失败');
+        }
+
+        return $this->success('ok', [
+            'category' => $category,
+            'timePeriod' => $timePeriod,
+            'orderBy' => $orderBy,
+            'limit' => $limit,
+            'offset' => $offset,
+            'user' => $user,
+            'userName' => $userName,
+            'list' => $normalized,
+        ]);
+    }
+
     public function sellPosition(Request $request, PolymarketTradingService $trading)
     {
         /** @var PmMember $member */

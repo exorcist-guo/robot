@@ -171,6 +171,45 @@ class PolymarketDataClient
     }
 
     /**
+     * @param array<string,mixed> $params
+     * @return array<int,array<string,mixed>>
+     */
+    public function getLeaderboardV1(array $params): array
+    {
+        $res = $this->client->get('v1/leaderboard', [
+            'query' => $params,
+            'headers' => [
+                'User-Agent' => 'Mozilla/5.0',
+                'Accept' => 'application/json',
+            ],
+        ]);
+
+        $json = json_decode($res->getBody()->getContents(), true);
+        return is_array($json) ? array_values($json) : [];
+    }
+
+    /**
+     * @param array<string,mixed> $entry
+     * @return array<string,mixed>
+     */
+    public function normalizeLeaderboardEntryV1(array $entry, string $timePeriod, string $orderBy): array
+    {
+        return [
+            'rank' => (string) ($entry['rank'] ?? ''),
+            'proxy_wallet' => strtolower((string) ($entry['proxyWallet'] ?? '')),
+            'username' => (string) ($entry['userName'] ?? ''),
+            'volume' => (string) ($entry['vol'] ?? '0'),
+            'pnl' => (string) ($entry['pnl'] ?? '0'),
+            'profile_image' => (string) ($entry['profileImage'] ?? ''),
+            'x_username' => (string) ($entry['xUsername'] ?? ''),
+            'verified_badge' => (bool) ($entry['verifiedBadge'] ?? false),
+            'time_period' => $timePeriod,
+            'order_by' => $orderBy,
+            'raw' => $entry,
+        ];
+    }
+
+    /**
      * @return array<int, array<string,mixed>>
      */
     public function getActivityByUser(string $user, int $limit = 30, int $offset = 0): array

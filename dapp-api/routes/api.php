@@ -48,6 +48,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/markets/user-pnl', [MarketController::class, 'userPnl']);
     Route::get('/markets/user-stats', [MarketController::class, 'userStats']);
     Route::get('/markets/value', [MarketController::class, 'userValue']);
+    Route::get('/markets/leaderboard', [MarketController::class, 'leaderboard']);
     Route::get('/markets/positions', [MarketController::class, 'positions']);
     Route::post('/markets/positions/sell', [MarketController::class, 'sellPosition']);
 

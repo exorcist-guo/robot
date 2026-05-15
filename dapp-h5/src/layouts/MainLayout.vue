@@ -7,6 +7,7 @@
       <van-tabbar route class="layout-tabbar">
         <van-tabbar-item replace to="/home" icon="home-o">首页</van-tabbar-item>
         <van-tabbar-item replace to="/community" icon="friends-o">社区</van-tabbar-item>
+        <van-tabbar-item replace to="/leaderboard" icon="fire-o">排行榜</van-tabbar-item>
         <van-tabbar-item replace to="/me" icon="manager-o">我的</van-tabbar-item>
       </van-tabbar>
     </div>

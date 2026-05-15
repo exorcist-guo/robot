@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import LoginPage from '../pages/LoginPage.vue'
 import HomePage from '../pages/HomePage.vue'
 import CommunityPage from '../pages/CommunityPage.vue'
+import LeaderboardPage from '../pages/LeaderboardPage.vue'
 import MePage from '../pages/MePage.vue'
 import CopyTasksPage from '../pages/CopyTasksPage.vue'
 import RecordsPage from '../pages/RecordsPage.vue'
@@ -20,6 +21,7 @@ const router = createRouter({
         { path: '', redirect: '/home' },
         { path: '/home', component: HomePage },
         { path: '/community', component: CommunityPage },
+        { path: '/leaderboard', component: LeaderboardPage },
         { path: '/me', component: MePage },
       ],
     },
