@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { showConfirmDialog, showToast } from 'vant'
 import http from '../api/http'
-import { useAppStore } from '../stores/app'
 
 // 页面分段与持仓状态
 type Segment = 'holding' | 'records'
@@ -73,8 +73,7 @@ type ActivityItem = {
   icon: string
 }
 
-// 页面基础状态
-const store = useAppStore()
+const route = useRoute()
 
 const profile = ref({
   name: 'Anon',
@@ -102,7 +101,6 @@ const periodTabs = [
 const activePeriod = ref('1D')
 const activeSegment = ref<Segment>('holding')
 const activeStatus = ref<PositionStatus>('active')
-const sellingTokenId = ref('')
 const searchKeyword = ref('')
 const trendPoints = ref<number[]>([])
 const activePositions = ref<any[]>([])
@@ -279,7 +277,6 @@ const mapActivityToCard = (item: any, index: number): ActivityItem => {
   }
 }
 
-// 列表计算
 const activePositionCards = computed(() => {
   const keyword = searchKeyword.value.trim().toLowerCase()
   return activePositions.value
@@ -302,7 +299,6 @@ const closedPositionCards = computed(() => {
 
 const activityCards = computed(() => activities.value.map((item, index) => mapActivityToCard(item, index)))
 
-// 图表与统计处理
 const chartPath = computed(() => {
   const points = trendPoints.value.length > 1 ? trendPoints.value : [0, 0, 0, 0, 0, 0]
   const width = 500
@@ -379,13 +375,8 @@ const normalizePnlSeries = (payload: any) => {
     .filter((value: number) => !Number.isNaN(value))
 }
 
-// 接口请求
 const resolveUserAddress = async () => {
-  if (!store.me) {
-    await store.fetchMe().catch(() => null)
-  }
-  const me = store.me || {}
-  return String(me?.wallet?.signer_address || me?.address || '').toLowerCase()
+  return String(route.params.proxyWallet || '').toLowerCase()
 }
 
 const resetPagedState = (state: PagedState) => {
@@ -574,7 +565,7 @@ const loadHomeData = async () => {
 
   profile.value = {
     ...profile.value,
-    name: shortenAddress(String(store.me?.nickname || store.me?.address || 'Anon')),
+    name: shortenAddress(address),
   }
 
   summary.value = {
@@ -590,7 +581,6 @@ const loadHomeData = async () => {
   await loadActivePositions(true)
 }
 
-// 页面交互
 const setPeriod = async (value: string) => {
   activePeriod.value = value
   await loadPnlData(userAddress.value)
@@ -619,40 +609,6 @@ const switchToRecordsTab = async () => {
   }
 }
 
-const sellPosition = async (item: PositionItem) => {
-  if (!item.tokenId || sellingTokenId.value) return
-
-  await showConfirmDialog({
-    title: '确认卖出全部持仓？',
-    message: `将按当前盘口卖出「${item.title}」的全部 ${item.subtitle} 持仓。`,
-    confirmButtonText: '确认卖出',
-    cancelButtonText: '取消',
-    confirmButtonColor: '#ef4444',
-  })
-
-  sellingTokenId.value = item.tokenId
-  try {
-    const { data } = await http.post('/markets/positions/sell', {
-      token_id: item.tokenId,
-      market_id: item.marketId,
-      outcome: item.subtitle,
-    })
-    showToast(data?.msg || '卖出订单已提交')
-    await Promise.all([
-      loadSummaryValue(userAddress.value),
-      loadUserStats(userAddress.value),
-      loadPnlData(userAddress.value),
-      loadActivePositions(true),
-      closedPaging.value.initialized ? loadClosedPositions(true) : Promise.resolve(),
-      activityPaging.value.initialized ? loadActivities(true) : Promise.resolve(),
-    ])
-  } catch (error: any) {
-    showToast(error?.message || '卖出失败')
-  } finally {
-    sellingTokenId.value = ''
-  }
-}
-
 const copyAddress = async () => {
   if (!userAddress.value) {
     showToast('暂无地址可复制')
@@ -675,7 +631,7 @@ const openPolymarketProfile = async () => {
 
   await showConfirmDialog({
     title: '提示',
-    message: '将跳转到官网polymarket',
+    message: '将跳转到polymarket',
     confirmButtonText: '确认',
     cancelButtonText: '取消',
   })
@@ -689,9 +645,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <!-- 页面主体 -->
   <div class="portfolio-page">
-    <!-- 顶部用户信息 -->
     <header class="portfolio-hero">
       <div class="portfolio-profile">
         <div class="portfolio-avatar" :style="{ background: profile.avatarGradient }"></div>
@@ -709,7 +663,6 @@ onMounted(async () => {
       </div>
     </header>
 
-    <!-- 资产汇总 -->
     <section class="summary-strip surface-card">
       <div class="summary-item">
         <div class="summary-value">{{ summary.holdingValue }}</div>
@@ -725,7 +678,6 @@ onMounted(async () => {
       </div>
     </section>
 
-    <!-- 盈亏走势图 -->
     <section class="pnl-card glass-card">
       <div class="pnl-header">
         <div class="pnl-meta">
@@ -762,7 +714,6 @@ onMounted(async () => {
       </div>
     </section>
 
-    <!-- 持仓与交易记录切换 -->
     <section class="content-block">
       <div class="toolbar-row">
         <button
@@ -792,7 +743,6 @@ onMounted(async () => {
       </div>
     </section>
 
-    <!-- 生效中持仓列表 -->
     <section v-if="activeSegment === 'holding' && activeStatus === 'active'" class="position-list">
       <van-list :loading="activePaging.loading" :finished="activePaging.finished" finished-text="没有更多生效中持仓了" @load="loadActivePositions(false)">
         <article v-for="item in activePositionCards" :key="item.key" class="position-card surface-card">
@@ -812,14 +762,6 @@ onMounted(async () => {
           <div class="position-card__right">
             <div class="position-value">{{ item.value }}</div>
             <div class="position-pnl" :class="{ 'position-pnl--negative': !item.positive }">{{ item.pnl }}</div>
-            <button
-              type="button"
-              class="sell-position-button"
-              :disabled="sellingTokenId === item.tokenId"
-              @click="sellPosition(item)"
-            >
-              {{ sellingTokenId === item.tokenId ? '卖出中' : '卖出' }}
-            </button>
           </div>
         </article>
       </van-list>
@@ -830,7 +772,6 @@ onMounted(async () => {
       </div>
     </section>
 
-    <!-- 已结束持仓列表 -->
     <section v-else-if="activeSegment === 'holding' && activeStatus === 'closed'" class="position-list">
       <van-list :loading="closedPaging.loading" :finished="closedPaging.finished" finished-text="没有更多已结束持仓了" @load="loadClosedPositions(false)">
         <article v-for="item in closedPositionCards" :key="item.key" class="position-card position-card--closed surface-card">
@@ -866,7 +807,6 @@ onMounted(async () => {
       </div>
     </section>
 
-    <!-- 交易记录列表 -->
     <section v-else class="position-list">
       <van-list :loading="activityPaging.loading" :finished="activityPaging.finished" finished-text="没有更多交易记录了" @load="loadActivities(false)">
         <article v-for="item in activityCards" :key="item.key" class="position-card surface-card">
@@ -899,7 +839,6 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-/* 页面整体布局 */
 .portfolio-page {
   min-height: 100vh;
   max-width: 520px;
@@ -912,7 +851,6 @@ onMounted(async () => {
     linear-gradient(180deg, #fbfbff 0%, #f2f4fb 36%, #eef1f7 100%);
 }
 
-/* 顶部区域 */
 .portfolio-hero {
   display: flex;
   align-items: center;
@@ -957,7 +895,6 @@ onMounted(async () => {
   font-size: 18px;
 }
 
-/* 汇总卡片 */
 .summary-strip {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -994,7 +931,6 @@ onMounted(async () => {
   color: #6b7280;
 }
 
-/* 盈亏卡片与图表 */
 .pnl-card {
   padding: 18px 16px 16px;
   border-radius: 26px;
@@ -1074,28 +1010,8 @@ onMounted(async () => {
   display: block;
 }
 
-/* 内容切换与工具栏 */
 .content-block {
   margin-bottom: 14px;
-}
-
-.section-switcher {
-  display: flex;
-  gap: 22px;
-  margin-bottom: 14px;
-}
-
-.section-switcher__tab {
-  border: 0;
-  background: transparent;
-  padding: 0;
-  color: #9ca3af;
-  font-size: 18px;
-  font-weight: 800;
-}
-
-.section-switcher__tab--active {
-  color: #111827;
 }
 
 .toolbar-row {
@@ -1121,38 +1037,6 @@ onMounted(async () => {
   color: #111827;
 }
 
-.toolbar-pill--sort {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  gap: 6px;
-}
-
-.search-shell {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 14px;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.9);
-  color: #9ca3af;
-  box-shadow: inset 0 0 0 1px rgba(226, 232, 240, 0.9);
-}
-
-.search-shell__icon {
-  font-size: 16px;
-}
-
-.search-shell__input {
-  width: 100%;
-  border: 0;
-  outline: none;
-  background: transparent;
-  color: #111827;
-  font-size: 14px;
-}
-
-/* 列表卡片 */
 .position-list {
   display: grid;
   gap: 12px;
@@ -1283,23 +1167,6 @@ onMounted(async () => {
   color: #ef4444;
 }
 
-.sell-position-button {
-  margin-top: 10px;
-  border: 0;
-  border-radius: 999px;
-  padding: 7px 12px;
-  background: #fee2e2;
-  color: #dc2626;
-  font-size: 12px;
-  font-weight: 800;
-  box-shadow: 0 8px 18px rgba(239, 68, 68, 0.12);
-}
-
-.sell-position-button:disabled {
-  opacity: 0.62;
-}
-
-/* 空状态 */
 .empty-records {
   padding: 18px;
 }

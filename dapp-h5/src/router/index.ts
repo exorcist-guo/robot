@@ -8,6 +8,7 @@ import CopyTasksPage from '../pages/CopyTasksPage.vue'
 import RecordsPage from '../pages/RecordsPage.vue'
 import RecordDetailPage from '../pages/RecordDetailPage.vue'
 import TriggerStatsPage from '../pages/TriggerStatsPage.vue'
+import ProfileStatsPage from '../pages/ProfileStatsPage.vue'
 import MainLayout from '../layouts/MainLayout.vue'
 
 const router = createRouter({
@@ -29,6 +30,7 @@ const router = createRouter({
     { path: '/records', component: RecordsPage },
     { path: '/records/:id', component: RecordDetailPage },
     { path: '/trigger-stats', component: TriggerStatsPage },
+    { path: '/profile-stats/:proxyWallet', component: ProfileStatsPage },
   ],
 })
 

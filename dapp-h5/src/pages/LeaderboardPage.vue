@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { showFailToast } from 'vant'
+import { useRouter } from 'vue-router'
 import http from '../api/http'
 
 type LeaderboardItem = {
@@ -13,6 +14,8 @@ type LeaderboardItem = {
   x_username: string
   verified_badge: boolean
 }
+
+const router = useRouter()
 
 const leaders = ref<LeaderboardItem[]>([])
 const loading = ref(false)
@@ -194,6 +197,11 @@ const selectOrderBy = async (value: string) => {
   await loadLeaders(true)
 }
 
+const openProfileStats = (proxyWallet: string) => {
+  if (!proxyWallet) return
+  router.push(`/profile-stats/${proxyWallet}`)
+}
+
 onMounted(() => {
   loadLeaders(true)
 })
@@ -272,7 +280,7 @@ onMounted(() => {
 
     <van-list :loading="loading" :finished="finished" finished-text="没有更多榜单成员了" @load="loadLeaders(false)">
       <section class="leaderboard-list surface-card">
-        <article v-for="item in leaderRows" :key="item.proxy_wallet" class="leaderboard-item">
+        <article v-for="item in leaderRows" :key="item.proxy_wallet" class="leaderboard-item" @click="openProfileStats(item.proxy_wallet)">
           <div class="leaderboard-rank">{{ item.rankText }}</div>
           <div class="leaderboard-avatar" :style="item.avatarStyle">
             <img v-if="item.profile_image" :src="item.profile_image" :alt="item.name" class="leaderboard-avatar__image" />
@@ -392,7 +400,8 @@ onMounted(() => {
 
 .leaderboard-toolbar {
   position: relative;
-  z-index: 10;
+  z-index: 40;
+  overflow: visible;
   display: flex;
   align-items: center;
   justify-content: space-between;
