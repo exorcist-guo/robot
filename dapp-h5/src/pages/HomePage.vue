@@ -861,7 +861,7 @@ onMounted(async () => {
               <div class="closed-position-prices">
                 <span>{{ item.openBadge }}</span>
                 <span>{{ item.closeBadge }}</span>
-                <span>{{ item.shares }}</span>
+  
               </div>
             </div>
           </div>
@@ -869,6 +869,7 @@ onMounted(async () => {
             <div class="position-value">{{ item.pnlValue }}</div> 
             <div class="position-pnl" :class="{ 'position-pnl--negative': !item.positive }">{{ item.pnl }}</div>
             <div class="position-shares">投入 {{ item.invested }}</div>
+            <span>{{ item.shares }}</span>
           </div>
         </article>
       </van-list>
@@ -1269,7 +1270,7 @@ onMounted(async () => {
 }
 
 .closed-position-prices span {
-  padding: 5px 8px;
+  padding: 5px 4px;
   border-radius: 999px;
   background: rgba(241, 245, 249, 0.9);
 }
