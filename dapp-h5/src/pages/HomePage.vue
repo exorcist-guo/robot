@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { showConfirmDialog, showToast } from 'vant'
+import heroBanner from '../../ai.jpg'
+import heroBannerTwo from '../../ai2.jpg'
 import http from '../api/http'
 import { useAppStore } from '../stores/app'
 
@@ -95,7 +97,7 @@ const periodTabs = [
   { label: '1周', value: '1W', pnlInterval: '1w', pnlFidelity: '3h' },
   { label: '1个月', value: '1M', pnlInterval: '1m', pnlFidelity: '18h' },
   { label: '1年', value: '1Y', pnlInterval: 'all', pnlFidelity: '1d' },
-  { label: '年初至今', value: 'YTD', pnlInterval: 'all', pnlFidelity: '1d' },
+  // { label: '年初至今', value: 'YTD', pnlInterval: 'all', pnlFidelity: '1d' },
   { label: '全部', value: 'ALL', pnlInterval: 'all', pnlFidelity: 'all' },
 ]
 
@@ -722,6 +724,18 @@ onMounted(async () => {
       </div>
     </header>
 
+    <!-- 轮播 -->
+    <section class="banner-swiper surface-card">
+      <van-swipe class="banner-swiper__track" :autoplay="4000" indicator-color="#ffffff">
+        <van-swipe-item>
+          <img :src="heroBanner" alt="龙虾AI polymarket 交易预测" class="banner-swiper__image" />
+        </van-swipe-item>
+        <van-swipe-item>
+          <img :src="heroBannerTwo" alt="龙虾AI 自动预测 Polymarket 交易" class="banner-swiper__image" />
+        </van-swipe-item>
+      </van-swipe>
+    </section>
+
     <!-- 资产汇总 -->
     <section class="summary-strip surface-card">
       <div class="summary-item">
@@ -741,10 +755,10 @@ onMounted(async () => {
     <!-- 盈亏走势图 -->
     <section class="pnl-card glass-card">
       <div class="pnl-header">
-        <div class="pnl-meta">
+        <!-- <div class="pnl-meta">
           <span class="pnl-dot"></span>
           <span>{{ summary.pnlLabel }}</span>
-        </div>
+        </div> -->
         <div class="pnl-tabs">
           <button
             v-for="tab in periodTabs"
@@ -971,6 +985,23 @@ onMounted(async () => {
   font-size: 18px;
 }
 
+/* 轮播 */
+.banner-swiper {
+  margin-bottom: 18px;
+  overflow: hidden;
+}
+
+.banner-swiper__track {
+  width: 100%;
+  border-radius: 24px;
+}
+
+.banner-swiper__image {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
 /* 汇总卡片 */
 .summary-strip {
   display: grid;
@@ -1039,25 +1070,31 @@ onMounted(async () => {
 
 .pnl-tabs {
   display: flex;
-  gap: 6px;
-  overflow-x: auto;
-  padding-bottom: 4px;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.62);
+  box-shadow: inset 0 0 0 1px rgba(226, 232, 240, 0.9);
 }
 
 .period-tab {
   flex: 0 0 auto;
   border: 0;
   border-radius: 999px;
-  padding: 6px 10px;
+  padding: 8px 14px;
   background: transparent;
-  color: #6b7280;
+  color: #64748b;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  transition: all 0.2s ease;
 }
 
 .period-tab--active {
-  background: #edf2ff;
-  color: #4f46e5;
+  background: linear-gradient(135deg, #5b4eff, #6f63ff);
+  color: #ffffff;
+  box-shadow: 0 10px 22px rgba(91, 78, 255, 0.24);
 }
 
 .pnl-number {
