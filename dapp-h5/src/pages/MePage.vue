@@ -7,6 +7,16 @@ import http from '../api/http'
 const store = useAppStore()
 const checkingAllowance = ref(false)
 const approving = ref(false)
+const accountExpanded = ref(false)
+const allowanceExpanded = ref(false)
+
+const toggleAccount = () => {
+  accountExpanded.value = !accountExpanded.value
+}
+
+const toggleAllowance = () => {
+  allowanceExpanded.value = !allowanceExpanded.value
+}
 
 const hasWallet = computed(() => !!store.walletStatus?.has_wallet)
 const allowanceInfo = computed(() => store.walletAllowanceStatus?.allowance ?? null)
@@ -88,58 +98,72 @@ const approveWallet = async () => {
     </section>
 
     <section class="surface-card section-card">
-      <div class="section-header">
-        <h2 class="section-title">账户概览</h2>
-        <span class="info-chip" :class="hasWallet ? 'info-chip--success' : 'info-chip--warning'">
-          {{ hasWallet ? 'PM 托管钱包已创建' : 'PM 托管钱包未创建' }}
-        </span>
-      </div>
-      <van-cell-group inset>
-        <van-cell title="钱包地址" :label="store.me?.address || '-'" class="address-row" />
-        <van-cell title="昵称" :value="store.me?.nickname || '-'" />
-        <van-cell title="Signer 地址" :label="store.walletStatus?.wallet?.signer_address || '-'" class="address-row" />
-        <van-cell title="Funder 地址" :label="store.walletStatus?.wallet?.funder_address || '-'" class="address-row" />
-      </van-cell-group>
+      <button type="button" class="section-toggle" @click="toggleAccount">
+        <div class="section-header">
+          <h2 class="section-title">账户概览</h2>
+          <div class="section-toggle__right">
+            <span class="info-chip" :class="hasWallet ? 'info-chip--success' : 'info-chip--warning'">
+              {{ hasWallet ? 'PM 托管钱包已创建' : 'PM 托管钱包未创建' }}
+            </span>
+            <span class="section-toggle__icon">{{ accountExpanded ? '−' : '+' }}</span>
+          </div>
+        </div>
+      </button>
+      <template v-if="accountExpanded">
+        <van-cell-group inset>
+          <van-cell title="钱包地址" :label="store.me?.address || '-'" class="address-row" />
+          <van-cell title="昵称" :value="store.me?.nickname || '-'" />
+          <van-cell title="Signer 地址" :label="store.walletStatus?.wallet?.signer_address || '-'" class="address-row" />
+          <van-cell title="Funder 地址" :label="store.walletStatus?.wallet?.funder_address || '-'" class="address-row" />
+        </van-cell-group>
+      </template>
     </section>
 
     <section class="surface-card section-card">
-      <div class="section-header">
-        <div>
-          <h2 class="section-title">BUY 授权管理</h2>
-          <p class="inline-note">当前页面检查的是托管交易钱包对 USDC.e 的 BUY 授权状态；只有以下 spender 全部已授权时，状态才会显示完成。</p>
+      <button type="button" class="section-toggle" @click="toggleAllowance">
+        <div class="section-header">
+          <div>
+            <h2 class="section-title">BUY 授权管理</h2>
+            <p class="inline-note">当前页面检查的是托管交易钱包对 USDC.e 的 BUY 授权状态；只有以下 spender 全部已授权时，状态才会显示完成。</p>
+          </div>
+          <div class="section-toggle__right section-toggle__right--top">
+            <span
+              class="info-chip"
+              :class="allowanceLabel === 'BUY 全量授权已完成' ? 'info-chip--success' : allowanceLabel === 'BUY 全量授权未完成' ? 'info-chip--warning' : 'info-chip--brand'"
+            >
+              {{ allowanceLabel }}
+            </span>
+            <span class="section-toggle__icon">{{ allowanceExpanded ? '−' : '+' }}</span>
+          </div>
         </div>
-        <span
-          class="info-chip"
-          :class="allowanceLabel === 'BUY 全量授权已完成' ? 'info-chip--success' : allowanceLabel === 'BUY 全量授权未完成' ? 'info-chip--warning' : 'info-chip--brand'"
-        >
-          {{ allowanceLabel }}
-        </span>
-      </div>
-      <van-cell-group inset>
-        <van-cell title="BUY 授权状态" :value="allowanceLabel" />
-        <van-cell title="检测地址" :label="tradingWalletAddress" class="address-row" />
-        <van-cell title="USDC.e 可用余额" :value="formattedAllowanceBalance" />
-        <van-cell title="失败代码" :value="readinessInfo?.failure_code || '-'" />
-        <van-cell title="是否就绪" :value="readinessInfo?.is_ready ? '是' : '否'" />
-      </van-cell-group>
-      <van-cell-group v-if="allowanceItems.length" inset>
-        <van-cell
-          v-for="item in allowanceItems"
-          :key="item.spender"
-          :title="item.spender"
-          :label="item.allowance"
-          :value="item.is_approved ? '已授权' : '未授权'"
-          class="address-row"
-        />
-      </van-cell-group>
-      <div class="actions-stack">
-        <van-button block plain type="primary" :loading="checkingAllowance" :disabled="approving" @click="checkAllowanceStatus">
-          检测授权状态
-        </van-button>
-        <van-button block type="primary" :loading="approving" :disabled="checkingAllowance" @click="approveWallet">
-          一键授权
-        </van-button>
-      </div>
+      </button>
+      <template v-if="allowanceExpanded">
+        <van-cell-group inset>
+          <van-cell title="BUY 授权状态" :value="allowanceLabel" />
+          <van-cell title="检测地址" :label="tradingWalletAddress" class="address-row" />
+          <van-cell title="USDC.e 可用余额" :value="formattedAllowanceBalance" />
+          <van-cell title="失败代码" :value="readinessInfo?.failure_code || '-'" />
+          <van-cell title="是否就绪" :value="readinessInfo?.is_ready ? '是' : '否'" />
+        </van-cell-group>
+        <van-cell-group v-if="allowanceItems.length" inset>
+          <van-cell
+            v-for="item in allowanceItems"
+            :key="item.spender"
+            :title="item.spender"
+            :label="item.allowance"
+            :value="item.is_approved ? '已授权' : '未授权'"
+            class="address-row"
+          />
+        </van-cell-group>
+        <div class="actions-stack">
+          <van-button block plain type="primary" :loading="checkingAllowance" :disabled="approving" @click="checkAllowanceStatus">
+            检测授权状态
+          </van-button>
+          <van-button block type="primary" :loading="approving" :disabled="checkingAllowance" @click="approveWallet">
+            一键授权
+          </van-button>
+        </div>
+      </template>
     </section>
 
     <section class="actions-stack">
@@ -155,6 +179,31 @@ const approveWallet = async () => {
   gap: 14px;
   padding: 18px;
   margin-bottom: 18px;
+}
+
+.section-toggle {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  text-align: left;
+}
+
+.section-toggle__right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.section-toggle__right--top {
+  align-items: flex-start;
+}
+
+.section-toggle__icon {
+  color: #64748b;
+  font-size: 20px;
+  line-height: 1;
+  font-weight: 700;
 }
 
 .section-header {
