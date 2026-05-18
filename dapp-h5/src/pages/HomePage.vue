@@ -142,6 +142,17 @@ const formatCurrency = (value: unknown) => {
   })}`
 }
 
+const formatSummaryCurrency = (value: unknown) => {
+  const numeric = Number(value)
+  if (Number.isNaN(numeric)) return '$0.00'
+  const sign = numeric < 0 ? '-' : ''
+  const fractionDigits = Math.abs(numeric) > 1000 ? 0 : 2
+  return `${sign}$${Math.abs(numeric).toLocaleString('en-US', {
+    minimumFractionDigits: fractionDigits,
+    maximumFractionDigits: fractionDigits,
+  })}`
+}
+
 const formatCompactNumber = (value: unknown) => {
   const numeric = Number(value)
   if (Number.isNaN(numeric)) return '0'
@@ -236,11 +247,13 @@ const mapPositionToCard = (item: any, index: number): PositionItem => {
 }
 
 const mapClosedPositionToCard = (item: any, index: number): ClosedPositionItem => {
-  const pnlRaw = Number(item?.realizedPnl ?? item?.cashPnl ?? item?.pnl ?? 0)
+  const totalBought = Number(item?.totalBought ?? item?.size ?? 0)
   const investedRaw = Number(item?.initialValue ?? item?.totalBoughtValue ?? 0)
-  const avgPrice = item?.avgPrice ?? item?.price ?? 0
-  const closePrice = item?.curPrice ?? item?.closePrice ?? 0
-  const percentRaw = investedRaw > 0 ? (pnlRaw / investedRaw) * 100 : Number(item?.percentPnl ?? item?.percentRealizedPnl ?? 0)
+  const avgPrice = Number(item?.avgPrice ?? item?.price ?? 0)
+  const closePrice = Number(item?.curPrice ?? item?.closePrice ?? 0)
+  const pnlValueRaw = totalBought * closePrice
+  const percentRaw = avgPrice > 0 ? ((closePrice - avgPrice) / avgPrice) * 100 : 0
+  const realizedPnl = Number(item?.realizedPnl ?? 0).toFixed(2)
 
   return {
     key: String(item?.asset || item?.conditionId || item?.slug || item?.timestamp || index),
@@ -248,11 +261,11 @@ const mapClosedPositionToCard = (item: any, index: number): ClosedPositionItem =
     subtitle: toSubtitle(item),
     openBadge: `买入 ${formatBadge(avgPrice)}`,
     closeBadge: `结束 ${formatBadge(closePrice)}`,
-    shares: formatShare(item?.totalBought ?? item?.size ?? 0),
-    invested: formatCurrency(investedRaw || Number(avgPrice) * Number(item?.totalBought ?? item?.size ?? 0)),
-    pnl: `${formatCurrency(pnlRaw)} (${Number.isNaN(percentRaw) ? '0.00' : percentRaw.toFixed(2)}%)`,
-    pnlValue: formatCurrency(pnlRaw),
-    positive: pnlRaw >= 0,
+    shares: formatShare(totalBought),
+    invested: formatCurrency(investedRaw || avgPrice * totalBought),
+    pnl: realizedPnl+`(`+`${Number.isNaN(percentRaw) ? '0.00' : percentRaw.toFixed(2)}%`+`)`,
+    pnlValue: formatCurrency(pnlValueRaw),
+    positive: percentRaw >= 0,
     closedAt: formatDateTime(item?.timestamp ?? item?.endDate),
     icon: String(item?.icon || ''),
     logo: pickLogo(index),
@@ -419,7 +432,7 @@ const loadSummaryValue = async (address: string) => {
   const valueSummary = Array.isArray(valuePayload) ? (valuePayload[0] ?? {}) : valuePayload
   summary.value = {
     ...summary.value,
-    holdingValue: formatCurrency(valueSummary?.value ?? 0),
+    holdingValue: formatSummaryCurrency(valueSummary?.value ?? 0),
   }
 }
 
@@ -431,7 +444,7 @@ const loadUserStats = async (address: string) => {
   const statsPayload = data?.data?.stats ?? {}
   summary.value = {
     ...summary.value,
-    bestProfit: formatCurrency(extractBestProfit(statsPayload)),
+    bestProfit: formatSummaryCurrency(extractBestProfit(statsPayload)),
     predictions: formatCompactNumber(extractPredictions(statsPayload)),
   }
 }
@@ -853,7 +866,7 @@ onMounted(async () => {
             </div>
           </div>
           <div class="position-card__right">
-            <div class="position-value">{{ item.pnlValue }}</div>
+            <div class="position-value">{{ item.pnlValue }}</div> 
             <div class="position-pnl" :class="{ 'position-pnl--negative': !item.positive }">{{ item.pnl }}</div>
             <div class="position-shares">投入 {{ item.invested }}</div>
           </div>
