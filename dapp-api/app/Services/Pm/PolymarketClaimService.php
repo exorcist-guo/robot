@@ -2,6 +2,7 @@
 
 namespace App\Services\Pm;
 
+use App\Models\Pm\PmCustodyWallet;
 use App\Models\Pm\PmOrder;
 use EthTool\Credential;
 use GuzzleHttp\Client;
@@ -174,6 +175,142 @@ class PolymarketClaimService
     }
 
     /**
+     * @param array<int,array<string,mixed>> $positions
+     * @return array<string,mixed>
+     */
+    public function buildClaimPlanFromPositions(PmCustodyWallet $wallet, array $positions): array
+    {
+        $primary = $positions[0] ?? [];
+        $conditionId = strtolower(trim((string) ($primary['conditionId'] ?? '')));
+        $isNegativeRisk = (bool) ($primary['negativeRisk'] ?? false);
+        $indexSets = $this->resolveIndexSetsFromPositions($positions);
+        $collateralToken = strtolower((string) config('pm.claim_collateral_token', config('pm.collateral_token')));
+        $calldata = null;
+
+        if ($conditionId !== '') {
+            $calldata = $isNegativeRisk
+                ? $this->encodeNegRiskRedeemCalldataFromPositions($positions, $conditionId)
+                : $this->encodeRedeemPositionsCalldata(
+                    $collateralToken,
+                    self::ZERO_BYTES32,
+                    $conditionId,
+                    $indexSets,
+                );
+        }
+
+        $claimableValue = array_sum(array_map(static fn (array $position) => (float) ($position['currentValue'] ?? 0), $positions));
+
+        return [
+            'ready' => $conditionId !== '' && $calldata !== null,
+            'wallet_id' => $wallet->id,
+            'member_id' => $wallet->member_id,
+            'trading_address' => $wallet->tradingAddress(),
+            'signer_address' => strtolower((string) $wallet->signer_address),
+            'chain_id' => (int) config('pm.chain_id', 137),
+            'rpc_url_configured' => trim((string) config('pm.polygon_rpc_url')) !== '',
+            'contract' => strtolower((string) ($isNegativeRisk ? config('pm.neg_risk_adapter_contract') : config('pm.ctf_contract'))),
+            'method' => 'redeemPositions',
+            'signature' => $isNegativeRisk
+                ? 'redeemPositions(bytes32,uint256[])'
+                : 'redeemPositions(address,bytes32,bytes32,uint256[])',
+            'selector' => $isNegativeRisk ? self::NEG_RISK_REDEEM_POSITIONS_SELECTOR : self::REDEEM_POSITIONS_SELECTOR,
+            'params' => $isNegativeRisk
+                ? [
+                    'conditionId' => $conditionId,
+                    'amounts' => $this->resolveNegRiskRedeemAmountsFromPositions($positions),
+                ]
+                : [
+                    'collateralToken' => $collateralToken,
+                    'parentCollectionId' => self::ZERO_BYTES32,
+                    'conditionId' => $conditionId,
+                    'indexSets' => $indexSets,
+                ],
+            'encoded_args' => $calldata !== null ? substr($calldata, 10) : null,
+            'calldata' => $calldata,
+            'claimable_value' => $claimableValue,
+            'negative_risk' => $isNegativeRisk,
+            'positions_count' => count($positions),
+        ];
+    }
+
+    /**
+     * @param array<int,array<string,mixed>> $positions
+     * @return array<string,mixed>
+     */
+    public function claimPositionsOnChain(PmCustodyWallet $wallet, array $positions, bool $dryRun = false): array
+    {
+        $totalCurrentValue = array_sum(array_map(static fn (array $position) => (float) ($position['currentValue'] ?? 0), $positions));
+        $hasRedeemableBalance = collect($positions)->contains(function (array $position) {
+            return (bool) ($position['redeemable'] ?? false) && ((float) ($position['size'] ?? 0) > 0);
+        });
+
+        if ($totalCurrentValue <= 0 && !$hasRedeemableBalance) {
+            return [
+                'submitted' => false,
+                'success' => false,
+                'reason' => 'nothing_to_claim',
+                'error' => 'nothing_to_claim',
+                'tx_hash' => null,
+            ];
+        }
+
+        $plan = $this->buildClaimPlanFromPositions($wallet, $positions);
+        if (($plan['ready'] ?? false) !== true) {
+            return $plan + [
+                'submitted' => false,
+                'success' => false,
+                'reason' => 'missing_claim_context',
+                'error' => 'missing_claim_context',
+                'tx_hash' => null,
+            ];
+        }
+
+        if ($dryRun) {
+            return $plan + [
+                'submitted' => false,
+                'success' => false,
+                'reason' => 'dry_run',
+                'tx_hash' => null,
+            ];
+        }
+
+        $privateKey = $this->privateKeyResolver->resolve($wallet);
+        $isNegativeRisk = (bool) ($plan['negative_risk'] ?? false);
+        $collateralCandidates = $isNegativeRisk
+            ? ['']
+            : array_values(array_unique(array_filter([
+                (string) config('pm.legacy_collateral_token', ''),
+                (string) config('pm.claim_collateral_token', ''),
+                (string) config('pm.collateral_token', ''),
+            ])));
+
+        foreach ($collateralCandidates as $collateralToken) {
+            $result = $this->attemptClaimPositionsOnChain(
+                $wallet,
+                $positions,
+                $privateKey,
+                strtolower((string) $collateralToken)
+            );
+
+            if (($result['success'] ?? false) === true) {
+                return $plan + $result;
+            }
+
+            if ($isNegativeRisk || ($result['error'] ?? '') !== 'claim_effect_not_observed') {
+                return $plan + $result;
+            }
+        }
+
+        return $plan + [
+            'submitted' => false,
+            'success' => false,
+            'reason' => 'failed',
+            'error' => 'claim_effect_not_observed',
+            'tx_hash' => null,
+        ];
+    }
+
+    /**
      * 等待交易确认
      *
      * @param string $txHash 交易哈希
@@ -294,6 +431,24 @@ class PolymarketClaimService
     }
 
     /**
+     * @param array<int,array<string,mixed>> $positions
+     */
+    private function encodeNegRiskRedeemCalldataFromPositions(array $positions, string $conditionId): string
+    {
+        $amounts = $this->resolveNegRiskRedeemAmountsFromPositions($positions);
+        $head = '';
+        $head .= $this->encodeBytes32($conditionId);
+        $head .= $this->encodeUint256(64);
+
+        $tail = $this->encodeUint256(count($amounts));
+        foreach ($amounts as $amount) {
+            $tail .= $this->encodeDecimalUint256($amount);
+        }
+
+        return self::NEG_RISK_REDEEM_POSITIONS_SELECTOR . $head . $tail;
+    }
+
+    /**
      * @return array<int,int>
      */
     private function resolveIndexSets(PmOrder $order): array
@@ -312,6 +467,27 @@ class PolymarketClaimService
         }
 
         return [1, 2];
+    }
+
+    /**
+     * @param array<int,array<string,mixed>> $positions
+     * @return array<int,int>
+     */
+    private function resolveIndexSetsFromPositions(array $positions): array
+    {
+        $indexSets = [];
+        foreach ($positions as $position) {
+            $outcomeIndex = $position['outcomeIndex'] ?? null;
+            if ($outcomeIndex !== null && is_numeric($outcomeIndex)) {
+                $index = (int) $outcomeIndex;
+                if ($index >= 0 && $index <= 255) {
+                    $indexSets[] = 1 << $index;
+                }
+            }
+        }
+
+        $indexSets = array_values(array_unique($indexSets));
+        return $indexSets !== [] ? $indexSets : [1, 2];
     }
 
     private function isNegativeRiskOrder(PmOrder $order): bool
@@ -338,6 +514,37 @@ class PolymarketClaimService
         }
 
         return [$amount, '0'];
+    }
+
+    /**
+     * @param array<int,array<string,mixed>> $positions
+     * @return array<int,string>
+     */
+    private function resolveNegRiskRedeemAmountsFromPositions(array $positions): array
+    {
+        $amounts = ['0', '0'];
+
+        foreach ($positions as $position) {
+            $size = (string) ($position['size'] ?? '0');
+            $scaledAmount = $this->decimalToTokenUnits($size);
+            if (bccomp($scaledAmount, '0', 0) <= 0) {
+                continue;
+            }
+
+            $outcomeIndex = $position['outcomeIndex'] ?? null;
+            if (!is_numeric($outcomeIndex)) {
+                continue;
+            }
+
+            $index = (int) $outcomeIndex;
+            if ($index < 0 || $index > 1) {
+                continue;
+            }
+
+            $amounts[$index] = bcadd($amounts[$index], $scaledAmount, 0);
+        }
+
+        return $amounts;
     }
 
     private function resolveConditionId(PmOrder $order): ?string
@@ -382,6 +589,128 @@ class PolymarketClaimService
         return null;
     }
 
+    /**
+     * @param array<int,array<string,mixed>> $positions
+     * @return array<string,mixed>
+     */
+    private function attemptClaimPositionsOnChain(
+        PmCustodyWallet $wallet,
+        array $positions,
+        string $privateKey,
+        string $collateralToken
+    ): array {
+        $plan = $this->buildClaimPlanFromPositions($wallet, $positions);
+        $isNegativeRisk = (bool) ($plan['negative_risk'] ?? false);
+        $conditionId = strtolower((string) ($plan['params']['conditionId'] ?? ''));
+        $calldata = $isNegativeRisk
+            ? (string) ($plan['calldata'] ?? '')
+            : $this->encodeRedeemPositionsCalldata(
+                $collateralToken,
+                self::ZERO_BYTES32,
+                $conditionId,
+                $this->resolveIndexSetsFromPositions($positions)
+            );
+
+        $credential = Credential::fromKey(ltrim($privateKey, '0x'));
+        $from = strtolower($credential->getAddress());
+        $rpc = app(PolygonRpcService::class);
+        $beforeBalances = $this->getGroupTokenBalances($wallet, $positions, $rpc, true);
+        $beforeBalance = array_sum(array_filter($beforeBalances, static fn ($value) => $value !== null));
+        $beforeCollateralBalance = $this->getCollateralBalance($wallet, $rpc);
+
+        $tx = [
+            'from' => $from,
+            'to' => strtolower((string) ($isNegativeRisk ? config('pm.neg_risk_adapter_contract') : config('pm.ctf_contract'))),
+            'value' => '0x0',
+            'data' => $calldata,
+        ];
+
+        try {
+            $rpc->call('eth_call', [$tx, 'latest']);
+        } catch (\Throwable $e) {
+            return [
+                'submitted' => false,
+                'success' => false,
+                'reason' => 'failed',
+                'error' => 'eth_call 预检查失败: ' . $e->getMessage(),
+                'tx_hash' => null,
+            ];
+        }
+
+        $nonce = $rpc->getTransactionCount($from, 'pending');
+        $baseGasPrice = $rpc->rpcQuantityToInt($rpc->gasPrice());
+        $safeGasPrice = (int) ($baseGasPrice * 1.2);
+        $gasLimit = $this->resolveGasLimitFromRpc($rpc, $tx, $isNegativeRisk);
+
+        $raw = [
+            'nonce' => $rpc->toRpcHex($nonce),
+            'gasPrice' => $rpc->toRpcHex($safeGasPrice),
+            'gasLimit' => $rpc->toRpcHex($gasLimit),
+            'to' => $tx['to'],
+            'value' => $rpc->toRpcHex(0),
+            'data' => $calldata,
+            'chainId' => (int) config('pm.chain_id', 137),
+        ];
+
+        $signed = $credential->signTransaction($raw);
+        $txHash = $rpc->sendRawTransaction($signed);
+
+        for ($i = 0; $i < 30; $i++) {
+            sleep(2);
+            try {
+                $receipt = $rpc->getTransactionReceipt($txHash);
+                if ($receipt === null) {
+                    continue;
+                }
+
+                $rawStatus = $receipt['status'] ?? null;
+                $normalizedStatus = $rpc->normalizeReceiptStatus($rawStatus);
+                if (!$rpc->receiptStatusSucceeded($receipt)) {
+                    return [
+                        'submitted' => true,
+                        'success' => false,
+                        'reason' => 'failed',
+                        'error' => '交易失败',
+                        'tx_hash' => $txHash,
+                        'receipt_status' => $rawStatus,
+                        'normalized_receipt_status' => $normalizedStatus,
+                    ];
+                }
+
+                $afterBalances = $this->getGroupTokenBalances($wallet, $positions, $rpc, false);
+                $afterBalance = array_sum(array_filter($afterBalances, static fn ($value) => $value !== null));
+                $afterCollateralBalance = $this->getCollateralBalance($wallet, $rpc);
+                $verified = $this->verifyClaimSuccess($beforeBalance, $afterBalance, $beforeCollateralBalance, $afterCollateralBalance);
+
+                return [
+                    'submitted' => true,
+                    'success' => $verified,
+                    'reason' => $verified ? 'submitted' : 'failed',
+                    'error' => $verified ? null : 'claim_effect_not_observed',
+                    'tx_hash' => $txHash,
+                    'block_number' => isset($receipt['blockNumber']) ? hexdec($receipt['blockNumber']) : 0,
+                    'gas_used' => isset($receipt['gasUsed']) ? hexdec($receipt['gasUsed']) : 0,
+                    'receipt_status' => $rawStatus,
+                    'normalized_receipt_status' => $normalizedStatus,
+                    'before_balance' => $beforeBalance,
+                    'after_balance' => $afterBalance,
+                    'before_collateral_balance' => $beforeCollateralBalance,
+                    'after_collateral_balance' => $afterCollateralBalance,
+                    'balance_verified' => $verified,
+                ];
+            } catch (\Throwable) {
+            }
+        }
+
+        return [
+            'submitted' => true,
+            'success' => false,
+            'reason' => 'failed',
+            'error' => '交易确认超时，请手动查看: https://polygonscan.com/tx/' . $txHash,
+            'tx_hash' => $txHash,
+        ];
+    }
+
     private function encodeAddress(string $value): string
     {
         return str_pad(Str::lower(ltrim($value, '0x')), 64, '0', STR_PAD_LEFT);
@@ -417,6 +746,86 @@ class PolymarketClaimService
         $fraction = substr(str_pad($fraction, 6, '0'), 0, 6);
 
         return bcadd(bcmul($whole, '1000000', 0), $fraction, 0);
+    }
+
+    private function getCollateralBalance(PmCustodyWallet $wallet, ?PolygonRpcService $rpcService = null): ?int
+    {
+        $collateralToken = trim((string) config('pm.claim_collateral_token', config('pm.collateral_token')));
+        if ($collateralToken === '') {
+            return null;
+        }
+
+        try {
+            $rpcService ??= app(PolygonRpcService::class);
+            $method = '0x70a08231';
+            $addressHex = str_pad(substr(strtolower($wallet->signer_address), 2), 64, '0', STR_PAD_LEFT);
+            $result = $rpcService->call('eth_call', [[
+                'to' => strtolower($collateralToken),
+                'data' => $method . $addressHex,
+            ], 'latest']);
+
+            if (!is_string($result)) {
+                return null;
+            }
+
+            return $rpcService->rpcQuantityToInt($result);
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    /**
+     * @param array<int,array<string,mixed>> $positions
+     * @return array<int,?int>
+     */
+    private function getGroupTokenBalances(PmCustodyWallet $wallet, array $positions, ?PolygonRpcService $rpcService = null, bool $fallbackToClaimable = false): array
+    {
+        $balances = [];
+        foreach ($positions as $position) {
+            $balances[] = $this->getChainTokenBalance($wallet, (string) ($position['asset'] ?? ''), $rpcService, $fallbackToClaimable);
+        }
+        return $balances;
+    }
+
+    private function getChainTokenBalance(PmCustodyWallet $wallet, string $tokenId, ?PolygonRpcService $rpcService = null, bool $fallbackToClaimable = false): ?int
+    {
+        $tokenId = trim($tokenId);
+        if ($tokenId === '' || !preg_match('/^\d+$/', $tokenId)) {
+            return 0;
+        }
+
+        $ctfContract = (string) config('pm.ctf_contract');
+        if ($ctfContract === '') {
+            return $fallbackToClaimable ? null : 0;
+        }
+
+        try {
+            $rpcService ??= app(PolygonRpcService::class);
+            $method = '0x00fdd58e';
+            $addressHex = str_pad(substr(strtolower($wallet->signer_address), 2), 64, '0', STR_PAD_LEFT);
+            $tokenHex = str_pad($this->decToHex($tokenId), 64, '0', STR_PAD_LEFT);
+            $data = $method . $addressHex . $tokenHex;
+            $result = $rpcService->call('eth_call', [[
+                'to' => strtolower($ctfContract),
+                'data' => $data,
+            ], 'latest']);
+
+            if (!is_string($result)) {
+                return 0;
+            }
+
+            return $rpcService->rpcQuantityToInt($result);
+        } catch (\Throwable) {
+            return $fallbackToClaimable ? null : 0;
+        }
+    }
+
+    private function verifyClaimSuccess(?int $beforeTokenBalance, ?int $afterTokenBalance, ?int $beforeCollateralBalance, ?int $afterCollateralBalance): bool
+    {
+        $tokenReduced = $beforeTokenBalance !== null && $afterTokenBalance !== null && $afterTokenBalance < $beforeTokenBalance;
+        $collateralIncreased = $beforeCollateralBalance !== null && $afterCollateralBalance !== null && $afterCollateralBalance > $beforeCollateralBalance;
+
+        return $tokenReduced || $collateralIncreased;
     }
 
     /**
@@ -465,6 +874,23 @@ class PolymarketClaimService
         try {
             $estimated = $this->rpc($rpcUrl, 'eth_estimateGas', [$tx]);
             $estimatedInt = $this->rpcQuantityToInt($estimated);
+            if ($estimatedInt <= 0) {
+                return $fallback;
+            }
+
+            return max((int) ceil($estimatedInt * 1.3), $fallback);
+        } catch (\Throwable) {
+            return $fallback;
+        }
+    }
+
+    private function resolveGasLimitFromRpc(PolygonRpcService $rpc, array $tx, bool $isNegativeRisk): int
+    {
+        $fallback = $isNegativeRisk ? 400000 : 220000;
+
+        try {
+            $estimated = $rpc->call('eth_estimateGas', [$tx]);
+            $estimatedInt = $rpc->rpcQuantityToInt($estimated);
             if ($estimatedInt <= 0) {
                 return $fallback;
             }

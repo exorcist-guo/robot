@@ -1135,17 +1135,31 @@ class PolymarketTradingService
 
         $usdcERaw = $legacyToken !== '' && $owner !== '' ? $this->readErc20Balance($legacyToken, $owner) : '0';
         $pusdRaw = $collateralToken !== '' && $owner !== '' ? $this->readErc20Balance($collateralToken, $owner) : '0';
+        $polRaw = $owner !== '' ? $this->readNativeBalance($owner) : '0';
 
         return [
             'usdc_e_raw' => $usdcERaw,
             'pusd_raw' => $pusdRaw,
+            'pol_raw' => $polRaw,
             'usdc_e' => bcdiv($usdcERaw, '1000000', 6),
             'pusd' => bcdiv($pusdRaw, '1000000', 6),
+            'pol' => bcdiv($polRaw, '1000000000000000000', 6),
             'balance_total' => bcdiv(bcadd($usdcERaw, $pusdRaw, 0), '1000000', 6),
             'legacy_token' => $legacyToken,
             'collateral_token' => $collateralToken,
             'wallet_address' => $owner,
         ];
+    }
+
+    private function readNativeBalance(string $owner): string
+    {
+        $rpcUrl = trim((string) config('pm.polygon_rpc_url'));
+        if ($rpcUrl === '' || $owner === '') {
+            return '0';
+        }
+
+        $result = $this->rpc($rpcUrl, 'eth_getBalance', [strtolower($owner), 'latest']);
+        return $this->rpcHexToDecimalString($result);
     }
 
     private function readErc20Balance(string $token, string $owner): string

@@ -100,4 +100,14 @@ return [
         explode(',', (string) env('PM_SPONSORED_TRANSFER_ALLOWED_TOKENS', (string) env('PM_COLLATERAL_TOKEN', '')))
     ))),
     'sponsored_transfer_max_amount' => (string) env('PM_SPONSORED_TRANSFER_MAX_AMOUNT', '0'),
+
+    // gasless relayer
+    'gasless_base_url' => env('PM_GASLESS_BASE_URL', 'https://relayer-v2.polymarket.com'),
+    'gasless_timeout' => (int) env('PM_GASLESS_TIMEOUT', 30),
+    'gasless_fallback_enabled' => filter_var(env('PM_GASLESS_FALLBACK_ENABLED', true), FILTER_VALIDATE_BOOL),
+    'builder_api_key' => env('PM_BUILDER_API_KEY', ''),
+    'builder_api_secret' => env('PM_BUILDER_API_SECRET', ''),
+    'builder_api_passphrase' => env('PM_BUILDER_API_PASSPHRASE', ''),
+    'relayer_api_key' => env('PM_RELAYER_API_KEY', ''),
+    'relayer_api_key_address' => strtolower((string) env('PM_RELAYER_API_KEY_ADDRESS', '')),
 ];

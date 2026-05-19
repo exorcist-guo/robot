@@ -6,11 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Pm\PmCustodyTransferRequest;
 use App\Models\Pm\PmCustodyWallet;
 use App\Models\Pm\PmMember;
-use App\Models\Pm\PmPortfolioSnapshot;
-use App\Services\Pm\CustodyCipher;
 use App\Services\Pm\CustodyTransferService;
-use App\Services\Pm\EthSignature;
-use App\Services\Pm\GammaClient;
 use App\Services\Pm\PolymarketDataClient;
 use App\Services\Pm\PolymarketTradingService;
 use App\Traits\ApiResponseTrait;
@@ -30,7 +26,7 @@ class WalletController extends Controller
     /**
      * PM 托管钱包已改为登录自动创建。
      */
-    public function import(Request $request)
+    public function import()
     {
         return $this->error('PM 托管钱包已改为登录自动创建，无需再导入私钥');
     }
@@ -99,6 +95,7 @@ class WalletController extends Controller
                 'balances' => [
                     'usdc_e' => '0.000000',
                     'pusd' => '0.000000',
+                    'pol' => '0.000000',
                     'balance_total' => '0.000000',
                 ],
                 'holding_value' => '0',
@@ -128,6 +125,7 @@ class WalletController extends Controller
             'balances' => [
                 'usdc_e' => (string) ($balances['usdc_e'] ?? '0.000000'),
                 'pusd' => (string) ($balances['pusd'] ?? '0.000000'),
+                'pol' => (string) ($balances['pol'] ?? '0.000000'),
                 'balance_total' => (string) ($balances['balance_total'] ?? '0.000000'),
             ],
             'holding_value' => $holdingValue,

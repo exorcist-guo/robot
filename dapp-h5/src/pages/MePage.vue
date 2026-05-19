@@ -54,6 +54,12 @@ const assetBalanceLabel = computed(() => formatAssetValue(assetsSummary.value?.b
 const totalAssetsLabel = computed(() => formatAssetValue(assetsSummary.value?.total_assets ?? 0))
 const usdcEBalanceLabel = computed(() => formatAssetValue(assetsSummary.value?.balances?.usdc_e ?? 0))
 const pusdBalanceLabel = computed(() => formatAssetValue(assetsSummary.value?.balances?.pusd ?? 0))
+const polNumeric = computed(() => Number(assetsSummary.value?.balances?.pol ?? 0))
+const polBalanceLabel = computed(() => `${polNumeric.value.toLocaleString('en-US', {
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 6,
+})} POL`)
+const isLowPolBalance = computed(() => polNumeric.value > 0 && polNumeric.value < 1)
 const holdingValueLabel = computed(() => formatAssetValue(assetsSummary.value?.holding_value ?? 0))
 const depositAddress = computed(() => assetsSummary.value?.deposit_address || '-')
 const depositQrUrl = computed(() => {
@@ -181,8 +187,10 @@ const approveWallet = async () => {
       <van-cell-group inset>
         <van-cell title="USDC.e" :value="usdcEBalanceLabel" />
         <van-cell title="PUSD" :value="pusdBalanceLabel" />
+        <van-cell title="POL" :value="polBalanceLabel" :class="{ 'asset-row--warning': isLowPolBalance }" />
         <van-cell title="持仓价值" :value="holdingValueLabel" />
       </van-cell-group>
+      <p v-if="isLowPolBalance" class="asset-warning-note">POL 余额偏低，可能会影响 Polygon 链上 gas 支付。</p>
       <div class="actions-stack">
         <van-button block plain type="primary" :loading="assetsLoading" @click="openDepositDialog">
           充值
@@ -344,6 +352,18 @@ const approveWallet = async () => {
   margin: 12px 0 0;
   color: #6b7280;
   font-size: 13px;
+}
+
+.asset-warning-note {
+  margin: -4px 0 0;
+  color: #d97706;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.asset-row--warning :deep(.van-cell__title),
+.asset-row--warning :deep(.van-cell__value) {
+  color: #d97706;
 }
 
 .section-toggle {
