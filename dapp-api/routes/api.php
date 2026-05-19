@@ -65,6 +65,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/wallet/status', [WalletController::class, 'status']);
     Route::post('/wallet/sub/create', [WalletController::class, 'createSubWallet']);
     Route::get('/wallet/sub/status', [WalletController::class, 'custodyStatus']);
+    Route::get('/wallet/assets-summary', [WalletController::class, 'assetsSummary']);
     Route::post('/wallet/transfer/prepare', [WalletController::class, 'prepareTransfer']);
     Route::post('/wallet/transfer/submit', [WalletController::class, 'submitTransfer']);
     Route::get('/wallet/transfer/{id}', [WalletController::class, 'transferDetail']);

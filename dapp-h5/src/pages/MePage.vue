@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { showFailToast, showSuccessToast } from 'vant'
+import { showFailToast, showSuccessToast, showToast } from 'vant'
 import { useAppStore } from '../stores/app'
 import http from '../api/http'
 
@@ -9,6 +9,9 @@ const checkingAllowance = ref(false)
 const approving = ref(false)
 const accountExpanded = ref(false)
 const allowanceExpanded = ref(false)
+const assetsLoading = ref(false)
+const showDepositDialog = ref(false)
+const assetsSummary = ref<any>(null)
 
 const toggleAccount = () => {
   accountExpanded.value = !accountExpanded.value
@@ -39,18 +42,77 @@ const formattedAllowanceBalance = computed(() => {
     maximumFractionDigits: 6,
   })} USDC.e`
 })
+const formatAssetValue = (value: unknown) => {
+  const numeric = Number(value)
+  if (Number.isNaN(numeric)) return '$0.00'
+  return `$${numeric.toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`
+}
+const assetBalanceLabel = computed(() => formatAssetValue(assetsSummary.value?.balances?.balance_total ?? 0))
+const totalAssetsLabel = computed(() => formatAssetValue(assetsSummary.value?.total_assets ?? 0))
+const usdcEBalanceLabel = computed(() => formatAssetValue(assetsSummary.value?.balances?.usdc_e ?? 0))
+const pusdBalanceLabel = computed(() => formatAssetValue(assetsSummary.value?.balances?.pusd ?? 0))
+const holdingValueLabel = computed(() => formatAssetValue(assetsSummary.value?.holding_value ?? 0))
+const depositAddress = computed(() => assetsSummary.value?.deposit_address || '-')
+const depositQrUrl = computed(() => {
+  if (!assetsSummary.value?.deposit_address) return ''
+  return `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(assetsSummary.value.deposit_address)}`
+})
+
+const loadAssetsSummary = async () => {
+  assetsLoading.value = true
+  try {
+    const { data } = await http.get('/wallet/assets-summary')
+    assetsSummary.value = data?.data || null
+  } catch (error: any) {
+    showFailToast(error.message || '加载资产信息失败')
+  } finally {
+    assetsLoading.value = false
+  }
+}
 
 onMounted(async () => {
   await store.fetchMe().catch(() => null)
   const walletStatus = await store.fetchWalletStatus().catch(() => null)
   if (walletStatus?.has_wallet) {
-    await store.fetchWalletAllowanceStatus().catch(() => null)
+    await Promise.all([
+      store.fetchWalletAllowanceStatus().catch(() => null),
+      loadAssetsSummary(),
+    ])
   }
 })
 
 const logout = () => {
   localStorage.removeItem('token')
   location.href = '/login'
+}
+
+const copyDepositAddress = async () => {
+  if (!assetsSummary.value?.deposit_address) {
+    showToast('暂无充值地址')
+    return
+  }
+
+  try {
+    await navigator.clipboard.writeText(assetsSummary.value.deposit_address)
+    showToast('地址已复制')
+  } catch {
+    showToast('复制失败')
+  }
+}
+
+const openDepositDialog = () => {
+  if (!assetsSummary.value?.deposit_address) {
+    showToast('暂无充值地址')
+    return
+  }
+  showDepositDialog.value = true
+}
+
+const openWithdrawPlaceholder = () => {
+  showToast('提现功能开发中')
 }
 
 const checkAllowanceStatus = async () => {
@@ -80,6 +142,7 @@ const approveWallet = async () => {
     await Promise.all([
       store.fetchWalletStatus().catch(() => null),
       store.fetchWalletAllowanceStatus().catch(() => null),
+      loadAssetsSummary(),
     ])
   } catch (error: any) {
     showFailToast(error.message || '授权失败')
@@ -95,6 +158,39 @@ const approveWallet = async () => {
       <span class="page-eyebrow">Account Center</span>
       <h1 class="page-title">我的</h1>
       <p class="page-description">集中查看账户资料、托管钱包状态与授权信息。</p>
+    </section>
+    <!-- 资产模块 -->
+    <section class="surface-card section-card asset-card">
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">资产概览</h2>
+   
+        </div>
+        <span class="info-chip info-chip--brand">Polygon</span>
+      </div>
+      <div class="asset-summary-grid">
+        <div class="asset-summary-item">
+          <div class="asset-summary-label">余额</div>
+          <div class="asset-summary-value">{{ assetBalanceLabel }}</div>
+        </div>
+        <div class="asset-summary-item">
+          <div class="asset-summary-label">总资产</div>
+          <div class="asset-summary-value asset-summary-value--accent">{{ totalAssetsLabel }}</div>
+        </div>
+      </div>
+      <van-cell-group inset>
+        <van-cell title="USDC.e" :value="usdcEBalanceLabel" />
+        <van-cell title="PUSD" :value="pusdBalanceLabel" />
+        <van-cell title="持仓价值" :value="holdingValueLabel" />
+      </van-cell-group>
+      <div class="actions-stack">
+        <van-button block plain type="primary" :loading="assetsLoading" @click="openDepositDialog">
+          充值
+        </van-button>
+        <van-button block type="primary" :disabled="assetsLoading" @click="openWithdrawPlaceholder">
+          提现
+        </van-button>
+      </div>
     </section>
 
     <section class="surface-card section-card">
@@ -170,6 +266,14 @@ const approveWallet = async () => {
       <van-button block type="primary" to="/copy-tasks">跟单任务</van-button>
       <van-button block type="warning" @click="logout">退出登录</van-button>
     </section>
+
+    <van-dialog v-model:show="showDepositDialog" title="充值地址" show-cancel-button cancel-button-text="关闭" confirm-button-text="复制地址" @confirm="copyDepositAddress">
+      <div class="deposit-dialog">
+        <img v-if="depositQrUrl" :src="depositQrUrl" alt="充值二维码" class="deposit-dialog__qr" />
+        <div class="deposit-dialog__address">{{ depositAddress }}</div>
+        <p class="deposit-dialog__hint">支持 polygon 链的 USDC,USDT</p>
+      </div>
+    </van-dialog>
   </div>
 </template>
 
@@ -179,6 +283,67 @@ const approveWallet = async () => {
   gap: 14px;
   padding: 18px;
   margin-bottom: 18px;
+}
+
+.asset-card {
+  gap: 16px;
+}
+
+.asset-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.asset-summary-item {
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: inset 0 0 0 1px rgba(226, 232, 240, 0.9);
+}
+
+.asset-summary-label {
+  color: #6b7280;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.asset-summary-value {
+  margin-top: 8px;
+  color: #111827;
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.asset-summary-value--accent {
+  color: #0f766e;
+}
+
+.deposit-dialog {
+  padding: 8px 4px 4px;
+  text-align: center;
+}
+
+.deposit-dialog__qr {
+  display: block;
+  width: 220px;
+  height: 220px;
+  margin: 0 auto 14px;
+  border-radius: 16px;
+}
+
+.deposit-dialog__address {
+  color: #111827;
+  font-size: 13px;
+  line-height: 1.7;
+  word-break: break-all;
+}
+
+.deposit-dialog__hint {
+  margin: 12px 0 0;
+  color: #6b7280;
+  font-size: 13px;
 }
 
 .section-toggle {

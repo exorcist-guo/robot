@@ -6,10 +6,12 @@ use App\Http\Controllers\Controller;
 use App\Models\Pm\PmCustodyTransferRequest;
 use App\Models\Pm\PmCustodyWallet;
 use App\Models\Pm\PmMember;
+use App\Models\Pm\PmPortfolioSnapshot;
 use App\Services\Pm\CustodyCipher;
 use App\Services\Pm\CustodyTransferService;
 use App\Services\Pm\EthSignature;
 use App\Services\Pm\GammaClient;
+use App\Services\Pm\PolymarketDataClient;
 use App\Services\Pm\PolymarketTradingService;
 use App\Traits\ApiResponseTrait;
 use Illuminate\Http\Request;
@@ -80,6 +82,59 @@ class WalletController extends Controller
     {
         $member = $this->currentMember($request);
         return $this->success('ok', $service->custodyStatus($member));
+    }
+
+    public function assetsSummary(Request $request, PolymarketTradingService $trading, PolymarketDataClient $dataClient)
+    {
+        $member = $this->currentMember($request);
+        $wallet = PmCustodyWallet::with('apiCredentials')
+            ->where('member_id', $member->id)
+            ->where('wallet_role', PmCustodyWallet::ROLE_MASTER)
+            ->first();
+
+        if (!$wallet) {
+            return $this->success('ok', [
+                'deposit_address' => null,
+                'withdraw_address' => strtolower((string) $member->address),
+                'balances' => [
+                    'usdc_e' => '0.000000',
+                    'pusd' => '0.000000',
+                    'balance_total' => '0.000000',
+                ],
+                'holding_value' => '0',
+                'total_assets' => '0.000000',
+                'network' => 'polygon',
+                'tokens_supported' => ['USDC', 'USDT'],
+            ]);
+        }
+
+        $balances = $trading->getWalletAssetBalances($wallet);
+        $valuePayload = [];
+        try {
+            $valuePayload = $dataClient->getUserValue(strtolower((string) $wallet->tradingAddress()));
+        } catch (\Throwable) {
+            $valuePayload = [];
+        }
+
+        $valueSummary = is_array($valuePayload) && array_is_list($valuePayload)
+            ? ($valuePayload[0] ?? [])
+            : $valuePayload;
+        $holdingValue = (string) ($valueSummary['value'] ?? '0');
+        $totalAssets = bcadd((string) ($balances['balance_total'] ?? '0'), $holdingValue, 6);
+
+        return $this->success('ok', [
+            'deposit_address' => strtolower((string) ($wallet->funder_address ?: $wallet->signer_address)),
+            'withdraw_address' => strtolower((string) $member->address),
+            'balances' => [
+                'usdc_e' => (string) ($balances['usdc_e'] ?? '0.000000'),
+                'pusd' => (string) ($balances['pusd'] ?? '0.000000'),
+                'balance_total' => (string) ($balances['balance_total'] ?? '0.000000'),
+            ],
+            'holding_value' => $holdingValue,
+            'total_assets' => $totalAssets,
+            'network' => 'polygon',
+            'tokens_supported' => ['USDC', 'USDT'],
+        ]);
     }
 
     public function prepareTransfer(Request $request, CustodyTransferService $service)
