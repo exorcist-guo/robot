@@ -109,11 +109,18 @@ const copyDepositAddress = async () => {
   }
 }
 
-const openDepositDialog = () => {
+const openDepositDialog = async () => {
   if (!assetsSummary.value?.deposit_address) {
     showToast('暂无充值地址')
     return
   }
+
+  try {
+    await http.post('/wallet/mark-possible-deposit')
+  } catch (error: any) {
+    showToast(error?.message || '充值标记失败')
+  }
+
   showDepositDialog.value = true
 }
 
@@ -277,9 +284,10 @@ const approveWallet = async () => {
 
     <van-dialog v-model:show="showDepositDialog" title="充值地址" show-cancel-button cancel-button-text="关闭" confirm-button-text="复制地址" @confirm="copyDepositAddress">
       <div class="deposit-dialog">
+        <div class="deposit-dialog__status">后端已收到可能充值标记</div>
         <img v-if="depositQrUrl" :src="depositQrUrl" alt="充值二维码" class="deposit-dialog__qr" />
         <div class="deposit-dialog__address">{{ depositAddress }}</div>
-        <p class="deposit-dialog__hint">支持 polygon 链的 USDC,USDT</p>
+        <p class="deposit-dialog__hint">支持 polygon 链的 USDC</p>
       </div>
     </van-dialog>
   </div>

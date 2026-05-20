@@ -1151,6 +1151,16 @@ class PolymarketTradingService
         ];
     }
 
+    public function getErc20BalanceRaw(PmCustodyWallet $wallet, string $tokenAddress): string
+    {
+        $owner = strtolower((string) $wallet->tradingAddress());
+        if ($owner === '' || trim($tokenAddress) === '') {
+            return '0';
+        }
+
+        return $this->readErc20Balance(trim(strtolower($tokenAddress)), $owner);
+    }
+
     private function readNativeBalance(string $owner): string
     {
         $rpcUrl = trim((string) config('pm.polygon_rpc_url'));

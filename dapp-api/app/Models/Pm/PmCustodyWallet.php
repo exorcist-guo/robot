@@ -24,6 +24,9 @@ use Dcat\Admin\Traits\HasDateTimeFormatter;
  * @property int $signature_type 签名类型: 0=EOA 1=ProxyEmail 2=ProxyWallet/Safe
  * @property string $exchange_nonce Exchange nonce (默认0)
  * @property int $status 状态: 1=启用 0=锁定
+ * @property int $possible_deposit_status 可能充值状态: 0=否 1=是
+ * @property \Illuminate\Support\Carbon|null $possible_deposit_at 可能充值时间
+ * @property int $deposit_scan_count 扫描次数
  * @property \Illuminate\Support\Carbon|null $created_at
  * @property \Illuminate\Support\Carbon|null $updated_at
  * @property-read \App\Models\Pm\PmPolymarketApiCredential|null $apiCredentials
@@ -47,6 +50,9 @@ use Dcat\Admin\Traits\HasDateTimeFormatter;
  * @method static \Illuminate\Database\Eloquent\Builder|PmCustodyWallet whereSignatureType($value)
  * @method static \Illuminate\Database\Eloquent\Builder|PmCustodyWallet whereSignerAddress($value)
  * @method static \Illuminate\Database\Eloquent\Builder|PmCustodyWallet whereStatus($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|PmCustodyWallet wherePossibleDepositStatus($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|PmCustodyWallet wherePossibleDepositAt($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|PmCustodyWallet whereDepositScanCount($value)
  * @method static \Illuminate\Database\Eloquent\Builder|PmCustodyWallet whereUpdatedAt($value)
  * @method static \Illuminate\Database\Eloquent\Builder|PmCustodyWallet whereWalletRole($value)
  * @method static \Illuminate\Database\Eloquent\Builder|PmCustodyWallet whereAddress($value)

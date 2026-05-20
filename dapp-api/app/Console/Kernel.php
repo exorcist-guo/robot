@@ -16,6 +16,7 @@ use App\Console\Commands\PmSyncLeaderboardStatsCommand;
 use App\Console\Commands\PmTailSweepPriceDaemonCommand;
 use App\Console\Commands\PmPreplaceNextRoundOrderCommand;
 use App\Console\Commands\PmSkipRoundSettleCommand;
+use App\Console\Commands\PmScanPossibleDepositsCommand;
 use App\Console\Commands\PmWrapCollateralCommand;
 use App\Console\Commands\PmValidateSetupCommand;
 use App\Console\Commands\TestCommand;
@@ -40,6 +41,7 @@ class Kernel extends ConsoleKernel
         PmTailSweepPriceDaemonCommand::class,
         PmPreplaceNextRoundOrderCommand::class,
         PmSkipRoundSettleCommand::class,
+        PmScanPossibleDepositsCommand::class,
         PmWrapCollateralCommand::class,
         PmValidateSetupCommand::class,
     ];
@@ -71,6 +73,10 @@ class Kernel extends ConsoleKernel
         // $schedule->command('pm:preplace-next-round-order --once')
         // ->everyMinute()
         // ->withoutOverlapping();
+
+        $schedule->command('pm:scan-possible-deposits --once')
+            ->everyMinute()
+            ->withoutOverlapping();
 
         // // 每分钟结算已到期的隔一轮预测订单
         // $schedule->command('pm:skip-round-settle --once')

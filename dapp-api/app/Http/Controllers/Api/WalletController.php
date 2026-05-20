@@ -101,7 +101,7 @@ class WalletController extends Controller
                 'holding_value' => '0',
                 'total_assets' => '0.000000',
                 'network' => 'polygon',
-                'tokens_supported' => ['USDC', 'USDT'],
+                'tokens_supported' => ['USDC'],
             ]);
         }
 
@@ -132,6 +132,30 @@ class WalletController extends Controller
             'total_assets' => $totalAssets,
             'network' => 'polygon',
             'tokens_supported' => ['USDC', 'USDT'],
+        ]);
+    }
+
+    public function markPossibleDeposit(Request $request)
+    {
+        $member = $this->currentMember($request);
+        $wallet = PmCustodyWallet::where('member_id', $member->id)
+            ->where('wallet_role', PmCustodyWallet::ROLE_MASTER)
+            ->first();
+
+        if (!$wallet) {
+            return $this->error('PM 托管钱包不存在，请重新登录后重试');
+        }
+
+        $wallet->possible_deposit_status = 1;
+        $wallet->possible_deposit_at = now();
+        $wallet->deposit_scan_count = 0;
+        $wallet->save();
+
+        return $this->success('已标记可能充值', [
+            'wallet_id' => $wallet->id,
+            'possible_deposit_status' => (int) $wallet->possible_deposit_status,
+            'possible_deposit_at' => $wallet->possible_deposit_at?->toDateTimeString(),
+            'deposit_scan_count' => (int) $wallet->deposit_scan_count,
         ]);
     }
 
